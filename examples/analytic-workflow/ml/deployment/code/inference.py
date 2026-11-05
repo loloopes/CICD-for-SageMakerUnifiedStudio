@@ -37,7 +37,9 @@ def predict_fn(input_data, model_dict):
 def output_fn(prediction, accept='text/csv'):
     """Format output"""
     if accept == 'text/csv':
-        return '\n'.join(str(p) for p in prediction)
+        model_name = os.environ.get('MODEL_NAME', '')
+        rows = [f'{model_name},{p}' for p in prediction]
+        return 'model_name,prediction\n' + '\n'.join(rows)
     elif accept == 'application/x-npy':
         buffer = BytesIO()
         np.save(buffer, prediction)
