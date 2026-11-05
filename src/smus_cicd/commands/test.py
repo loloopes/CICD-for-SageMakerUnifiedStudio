@@ -165,9 +165,18 @@ def test_command(
                 _display_target_summary(stage_name, test_results, output)
                 continue
 
+            # get_datazone_project_info returns domain_id / project_id.
+            # Keep domainId / projectId as fallbacks for older callers.
+            resolved_domain_id = (
+                project_info.get("domain_id") or project_info.get("domainId") or ""
+            )
+            resolved_project_id = (
+                project_info.get("project_id") or project_info.get("projectId") or ""
+            )
+
             # Get domain name from domain_id if not provided
             domain_name = target_config.domain.name
-            if not domain_name and project_info.get("domainId"):
+            if not domain_name and resolved_domain_id:
                 from ..helpers.boto3_client import create_client
 
                 try:
@@ -175,7 +184,7 @@ def test_command(
                         "datazone", region=target_config.domain.region
                     )
                     domain_response = datazone_client.get_domain(
-                        identifier=project_info["domainId"]
+                        identifier=resolved_domain_id
                     )
                     domain_name = domain_response.get("name", "")
                 except Exception:
@@ -186,10 +195,8 @@ def test_command(
 
             test_config = generate_test_config(
                 project_name=target_config.project.name,
-                project_id=project_info.get(
-                    "project_id", project_info.get("projectId", "")
-                ),
-                domain_id=project_info.get("domainId", ""),
+                project_id=resolved_project_id,
+                domain_id=resolved_domain_id,
                 domain_name=domain_name,
                 region=target_config.domain.region,
                 target_name=stage_name,
@@ -226,10 +233,8 @@ def smus_config():
             test_env = os.environ.copy()
             test_env.update(
                 {
-                    "SMUS_DOMAIN_ID": project_info.get("domainId", ""),
-                    "SMUS_PROJECT_ID": project_info.get(
-                        "project_id", project_info.get("projectId", "")
-                    ),
+                    "SMUS_DOMAIN_ID": resolved_domain_id,
+                    "SMUS_PROJECT_ID": resolved_project_id,
                     "SMUS_PROJECT_NAME": target_config.project.name,
                     "SMUS_TARGET_NAME": stage_name,
                     "SMUS_REGION": target_config.domain.region,
@@ -277,8 +282,8 @@ def smus_config():
                     test_results[stage_name] = {
                         "status": "passed",
                         "output": test_output_text,
-                        "project_id": project_info.get("id"),
-                        "domain_id": project_info.get("domainId"),
+                        "project_id": resolved_project_id,
+                        "domain_id": resolved_domain_id,
                     }
                 else:
                     if output.upper() != "JSON":
@@ -288,8 +293,8 @@ def smus_config():
                     test_results[stage_name] = {
                         "status": "failed",
                         "output": test_output_text,
-                        "project_id": project_info.get("id"),
-                        "domain_id": project_info.get("domainId"),
+                        "project_id": resolved_project_id,
+                        "domain_id": resolved_domain_id,
                     }
                     overall_success = False
 
