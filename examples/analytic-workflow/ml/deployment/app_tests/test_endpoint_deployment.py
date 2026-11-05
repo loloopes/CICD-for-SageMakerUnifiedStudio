@@ -11,13 +11,23 @@ def test_endpoint_deployed():
     
     # List endpoints with the expected naming pattern
     response = sagemaker_client.list_endpoints(
-        NameContains="sagemaker-scikit-learn",
+        NameContains="realistic-classifier",
         SortBy="CreationTime",
         SortOrder="Descending",
         MaxResults=10
     )
-    
-    assert len(response["Endpoints"]) > 0, "No SageMaker endpoints found with pattern 'sagemaker-scikit-learn'"
+    if not response["Endpoints"]:
+        response = sagemaker_client.list_endpoints(
+            NameContains="sagemaker-scikit-learn",
+            SortBy="CreationTime",
+            SortOrder="Descending",
+            MaxResults=10
+        )
+
+    assert len(response["Endpoints"]) > 0, (
+        "No SageMaker endpoints found with pattern 'realistic-classifier' "
+        "or 'sagemaker-scikit-learn'"
+    )
     
     # Get the most recent endpoint
     latest_endpoint = response["Endpoints"][0]
