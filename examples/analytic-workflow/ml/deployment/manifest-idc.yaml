@@ -28,7 +28,7 @@ stages:
       - arn:aws:iam::${AWS_ACCOUNT_ID}:role/Admin
     environment_variables:
       S3_PREFIX: test
-      MODEL_NAME: ${MODEL_NAME:latest}
+      MODEL_NAME: "${MODEL_NAME:latest}"
     deployment_configuration:
       storage:
       - name: deployment-code
@@ -59,7 +59,7 @@ stages:
       - arn:aws:iam::${AWS_ACCOUNT_ID}:role/Admin
     environment_variables:
       S3_PREFIX: prod
-      MODEL_NAME: ${MODEL_NAME:latest}
+      MODEL_NAME: "${MODEL_NAME:latest}"
     deployment_configuration:
       storage:
       - name: deployment-code
