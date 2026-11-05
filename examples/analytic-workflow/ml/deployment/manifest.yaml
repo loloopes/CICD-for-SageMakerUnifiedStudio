@@ -25,6 +25,7 @@ stages:
       name: test-marketing
     environment_variables:
       S3_PREFIX: test
+      MODEL_NAME: ${MODEL_NAME:latest}
     deployment_configuration:
       storage:
       - name: deployment-code
@@ -52,6 +53,7 @@ stages:
       name: prod-marketing
     environment_variables:
       S3_PREFIX: prod
+      MODEL_NAME: ${MODEL_NAME:latest}
     deployment_configuration:
       storage:
       - name: deployment-code

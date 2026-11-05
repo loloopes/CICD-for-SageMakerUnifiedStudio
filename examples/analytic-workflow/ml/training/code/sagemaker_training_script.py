@@ -48,6 +48,7 @@ if __name__ == '__main__':
     parser.add_argument('--max-depth', type=int, default=10)
     parser.add_argument('--random-state', type=int, default=42)
     parser.add_argument('--model-name', type=str, default='realistic-classifier-v1')
+    parser.add_argument('--experiment-name', type=str, default='realistic-classifier')
     args = parser.parse_args()
     
     print(f"Training with parameters: n_estimators={args.n_estimators}, max_depth={args.max_depth}")
@@ -73,8 +74,17 @@ if __name__ == '__main__':
             os.environ['MLFLOW_ARTIFACT_URI'] = artifact_location
             print(f"MLflow artifact location set to: {artifact_location}")
         
-        # Start MLflow run
-        with mlflow.start_run():
+        # Create the experiment when it does not already exist, then log this run to it.
+        # SageMaker sets TRAINING_JOB_NAME in the container. Using it as the
+        # MLflow run name makes the run match the model.tar.gz folder.
+        mlflow.set_experiment(args.experiment_name)
+        training_job_name = os.environ.get("TRAINING_JOB_NAME")
+        print(f"MLflow experiment set to: {args.experiment_name}")
+        print(f"MLflow run name: {training_job_name or '(auto)'}")
+
+        with mlflow.start_run(run_name=training_job_name):
+            if training_job_name:
+                mlflow.log_param("training_job_name", training_job_name)
             # Log parameters
             mlflow.log_param("n_estimators", args.n_estimators)
             mlflow.log_param("max_depth", args.max_depth)

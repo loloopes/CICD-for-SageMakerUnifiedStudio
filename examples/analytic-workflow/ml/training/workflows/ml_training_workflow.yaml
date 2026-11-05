@@ -16,6 +16,7 @@ ml_training_workflow:
           python_version: "py3"
           training_instance_type: "ml.m5.large"
           model_name: "realistic-classifier-v1"
+          experiment_name: "realistic-classifier"
           region: "{domain.region}"
       output_config:
         output_formats: 
