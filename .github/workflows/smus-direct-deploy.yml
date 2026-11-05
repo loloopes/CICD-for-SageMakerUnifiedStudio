@@ -122,7 +122,9 @@ jobs:
           STS_REGION: ${{ vars.DOMAIN_REGION }}
           STS_ACCOUNT_ID: ${{ steps.aws-account.outputs.account-id }}
           AWS_ACCOUNT_ID: ${{ steps.aws-account.outputs.account-id }}
+          MODEL_NAME: ${{ vars.MODEL_NAME || 'latest' }}
         run: |
+          echo "🔍 MODEL_NAME: $MODEL_NAME"
           aws-smus-cicd-cli deploy \
             --manifest "${{ inputs.manifest_path }}" \
             --targets "${{ inputs.target }}"
