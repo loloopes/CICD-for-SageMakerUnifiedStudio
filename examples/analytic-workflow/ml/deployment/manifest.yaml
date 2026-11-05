@@ -2,9 +2,8 @@ applicationName: IntegrationTestMLDeployment
 content:
   storage:
   - name: deployment-code
-    connectionName: default.s3_shared
     include:
-    - ml/bundle/deployment-code
+    - code
   - name: deployment-workflows
     include:
     - workflows/ml_deployment_workflow.yaml
