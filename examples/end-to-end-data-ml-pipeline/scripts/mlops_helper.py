@@ -133,18 +133,36 @@ def _resolve_domain_id(
     return domain_id
 
 
-def _resolve_project_bucket(sts, domain_id: str, project_name: str, region: str) -> str:
-    """Resolve a project's shared S3 bucket name from its DataZone project id.
+def _resolve_project_location(
+    domain_id: str, project_name: str, region: str
+) -> tuple[str, str]:
+    """Return ``(bucket, key_prefix)`` for a project's ``default.s3_shared``.
 
-    Reuses ``smus_cicd.helpers.datazone.get_project_id_by_name`` for the lookup.
+    SageMaker Unified Studio puts every project in one domain bucket, under
+    ``{domain_id}/{project_id}/shared/``. The bucket suffix is not the project
+    id, so the location has to come from the connection rather than a name
+    built from the account, region, and project id.
     """
     from smus_cicd.helpers import datazone as smus_datazone
+    from smus_cicd.helpers.connections import (
+        get_connection_s3_uri,
+        get_project_connections,
+    )
 
     project_id = smus_datazone.get_project_id_by_name(project_name, domain_id, region)
     if not project_id:
         raise ValueError(f"Project '{project_name}' not found in domain {domain_id}")
-    account_id = sts.get_caller_identity()["Account"]
-    return f"amazon-sagemaker-{account_id}-{region}-{project_id}"
+
+    connections = get_project_connections(project_id, domain_id, region)
+    s3_uri = get_connection_s3_uri(connections)
+    if not s3_uri.startswith("s3://"):
+        raise ValueError(
+            f"Project '{project_name}' has no default.s3_shared s3Uri "
+            f"(got {s3_uri!r})"
+        )
+
+    bucket, _, prefix = s3_uri[5:].partition("/")
+    return bucket, prefix.strip("/")
 
 
 def _get_source_url_and_version(sm, model_package_arn: str) -> tuple[str, int]:
@@ -204,7 +222,6 @@ def cmd_stage_artifact(args: argparse.Namespace) -> int:
     """Copy model.tar.gz from the source bucket to a target stage bucket."""
     sm = boto3.client("sagemaker", region_name=args.region)
     s3 = boto3.client("s3", region_name=args.region)
-    sts = boto3.client("sts", region_name=args.region)
 
     logger.info("=" * 60)
     logger.info("STAGE MODEL ARTIFACT")
@@ -228,8 +245,14 @@ def cmd_stage_artifact(args: argparse.Namespace) -> int:
     logger.info(f"Source : {source_url}")
     logger.info(f"Version: {version}")
 
-    dest_bucket = _resolve_project_bucket(sts, domain_id, args.target_project_name, args.region)
-    dest_key = f"{args.target_prefix.rstrip('/')}/v{version}/model.tar.gz"
+    dest_bucket, shared_prefix = _resolve_project_location(
+        domain_id, args.target_project_name, args.region
+    )
+    relative = args.target_prefix.strip("/")
+    # default.s3_shared already ends in /shared/; don't write shared/shared/...
+    if shared_prefix.rstrip("/").endswith("/shared") and relative.startswith("shared/"):
+        relative = relative[len("shared/") :]
+    dest_key = f"{shared_prefix}/{relative}/v{version}/model.tar.gz"
     dest_url = f"s3://{dest_bucket}/{dest_key}"
     logger.info(f"Dest   : {dest_url}")
 
@@ -539,7 +562,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--target-prefix",
         default="shared/bank-mktg/mlops_pipeline/promoted-models",
-        help="Prefix inside the target bucket where the staged copy lands.",
+        help=(
+            "Path under the target project's default.s3_shared connection. "
+            "A leading 'shared/' is dropped when that connection URI already "
+            "ends in /shared/."
+        ),
     )
     sp.set_defaults(func=cmd_stage_artifact)
 
