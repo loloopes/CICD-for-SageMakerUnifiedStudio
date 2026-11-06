@@ -271,6 +271,10 @@ def cmd_stage_artifact(args: argparse.Namespace) -> int:
 def cmd_check_deploy_status(args: argparse.Namespace) -> int:
     """Fail if the most recent matching processing job didn't Complete.
 
+    When ``--endpoint-name`` is set, only jobs whose container args include
+    that endpoint are considered. That stops a successful DEV deploy from
+    being treated as a TEST/PROD success when no new job was created.
+
     Exit codes:
         0  Latest matching job is Completed.
         2  Latest matching job is Failed/Stopped.
@@ -280,23 +284,40 @@ def cmd_check_deploy_status(args: argparse.Namespace) -> int:
     sm = boto3.client("sagemaker", region_name=args.region)
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=args.max_age_minutes)
     logger.info("Looking for processing jobs:")
-    logger.info(f"  name_prefix = {args.name_prefix}")
-    logger.info(f"  region      = {args.region}")
-    logger.info(f"  since       = {cutoff.isoformat()}")
+    logger.info(f"  name_prefix   = {args.name_prefix}")
+    logger.info(f"  endpoint_name = {args.endpoint_name or '<any>'}")
+    logger.info(f"  region        = {args.region}")
+    logger.info(f"  since         = {cutoff.isoformat()}")
 
     response = sm.list_processing_jobs(
         NameContains=args.name_prefix,
         CreationTimeAfter=cutoff,
         SortBy="CreationTime",
         SortOrder="Descending",
-        MaxResults=5,
+        MaxResults=25,
     )
     jobs = response.get("ProcessingJobSummaries", [])
+    if args.endpoint_name:
+        matched = []
+        for summary in jobs:
+            detail = sm.describe_processing_job(
+                ProcessingJobName=summary["ProcessingJobName"]
+            )
+            args_list = detail.get("AppSpecification", {}).get("ContainerArguments", [])
+            if args.endpoint_name in args_list:
+                matched.append(summary)
+        jobs = matched
+
     if not jobs:
         logger.error(
-            f"No processing jobs matching '{args.name_prefix}' found in the "
-            f"last {args.max_age_minutes} minutes. The deploy DAG likely "
-            "didn't trigger a deploy_model run."
+            f"No processing jobs matching '{args.name_prefix}'"
+            + (
+                f" for endpoint '{args.endpoint_name}'"
+                if args.endpoint_name
+                else ""
+            )
+            + f" found in the last {args.max_age_minutes} minutes. "
+            "The deploy DAG likely didn't trigger a deploy_model run."
         )
         return 3
 
@@ -573,6 +594,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("check-deploy-status", help="Verify latest deploy processing job.")
     sp.add_argument("--region", required=True)
     sp.add_argument("--name-prefix", default="bank-mktg-deploy")
+    sp.add_argument(
+        "--endpoint-name",
+        default="",
+        help="Only match processing jobs that deploy this endpoint.",
+    )
     sp.add_argument("--max-age-minutes", type=int, default=60)
     sp.set_defaults(func=cmd_check_deploy_status)
 

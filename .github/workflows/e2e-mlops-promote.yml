@@ -260,6 +260,7 @@ jobs:
         run: |
           python3 "$MLOPS_HELPER" check-deploy-status \
             --region "$REGION" \
+            --endpoint-name "$ENDPOINT_NAME" \
             --max-age-minutes 60
 
       - name: Smoke test endpoint
@@ -400,6 +401,7 @@ jobs:
         run: |
           python3 "$MLOPS_HELPER" check-deploy-status \
             --region "$REGION" \
+            --endpoint-name "$ENDPOINT_NAME" \
             --max-age-minutes 60
 
       - name: Smoke test endpoint
@@ -540,6 +542,7 @@ jobs:
         run: |
           python3 "$MLOPS_HELPER" check-deploy-status \
             --region "$REGION" \
+            --endpoint-name "$ENDPOINT_NAME" \
             --max-age-minutes 60
 
       - name: Smoke test endpoint
