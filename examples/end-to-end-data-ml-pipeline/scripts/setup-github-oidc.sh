@@ -53,27 +53,34 @@ fi
 
 # ── Step 2: IAM role with OIDC trust ────────────────────────────────────────
 echo "Step 2: IAM role..."
-TRUST_POLICY=$(cat <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {
-      "Federated": "${OIDC_ARN}"
-    },
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {
-      "StringEquals": {
-        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-      },
-      "StringLike": {
-        "token.actions.githubusercontent.com:sub": "repo:${GITHUB_REPO}:environment:${ENV}"
+# Repos created after 2026-07-15 (and any repo that opted in) send an immutable
+# subject: repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:ENV. The name-only
+# subject does not match that token, and STS then denies AssumeRoleWithWebIdentity.
+SUB_CLAIMS=("repo:${GITHUB_REPO}:environment:${ENV}")
+if command -v gh >/dev/null 2>&1; then
+  IMMUTABLE_PREFIX=$(gh api "repos/${GITHUB_REPO}/actions/oidc/customization/sub" \
+    --jq 'if .use_immutable_subject == true then .sub_claim_prefix else empty end' 2>/dev/null || true)
+  if [ -n "${IMMUTABLE_PREFIX}" ]; then
+    SUB_CLAIMS+=("${IMMUTABLE_PREFIX}:environment:${ENV}")
+    echo "  Immutable OIDC subject enabled: ${IMMUTABLE_PREFIX}:environment:${ENV}"
+  fi
+fi
+SUB_JSON=$(printf '%s\n' "${SUB_CLAIMS[@]}" | jq -R . | jq -s .)
+TRUST_POLICY=$(jq -n \
+  --arg oidc "$OIDC_ARN" \
+  --argjson subs "$SUB_JSON" \
+  '{
+    Version: "2012-10-17",
+    Statement: [{
+      Effect: "Allow",
+      Principal: { Federated: $oidc },
+      Action: "sts:AssumeRoleWithWebIdentity",
+      Condition: {
+        StringEquals: { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+        StringLike: { "token.actions.githubusercontent.com:sub": $subs }
       }
-    }
-  }]
-}
-EOF
-)
+    }]
+  }')
 
 if aws iam get-role --role-name "$ROLE_NAME" &>/dev/null; then
   aws iam update-assume-role-policy --role-name "$ROLE_NAME" --policy-document "$TRUST_POLICY"

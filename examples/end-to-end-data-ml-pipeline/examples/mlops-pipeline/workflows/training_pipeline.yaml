@@ -52,7 +52,7 @@ training_pipeline:
       config:
         TrainingJobName: 'bank-mktg-xgb-{{ ts_nodash }}'
         AlgorithmSpecification:
-          TrainingImage: "683313688378.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-xgboost:1.7-1"
+          TrainingImage: "257758044811.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-xgboost:1.7-1"
           TrainingInputMode: File
         RoleArn: "{proj.iam_role_arn}"
         InputDataConfig:
@@ -108,7 +108,7 @@ training_pipeline:
             InstanceType: ml.m5.large
             VolumeSizeInGB: 10
         AppSpecification:
-          ImageUri: "683313688378.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-scikit-learn:1.2-1"
+          ImageUri: "257758044811.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-scikit-learn:1.2-1"
           ContainerEntrypoint: ["python3", "/opt/ml/processing/src/evaluate_model.py"]
           ContainerArguments:
             - "--training-job-prefix"
@@ -116,7 +116,7 @@ training_pipeline:
             - "--model-prefix"
             - "bank-mktg-model"
             - "--image-uri"
-            - "683313688378.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-xgboost:1.7-1"
+            - "257758044811.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-xgboost:1.7-1"
             - "--execution-role-arn"
             - "{proj.iam_role_arn}"
             - "--region"
@@ -152,7 +152,7 @@ training_pipeline:
       operator: airflow.providers.amazon.aws.operators.sagemaker.SageMakerRegisterModelVersionOperator
       retries: 0
       dependencies: [evaluate_model]
-      image_uri: "683313688378.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-xgboost:1.7-1"
+      image_uri: "257758044811.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-xgboost:1.7-1"
       # Pull the model artifact from the actual training job's output rather
       # than reconstructing the path from {{ ts_nodash }}. SageMaker training
       # job names must be globally unique, so on re-runs of the same logical

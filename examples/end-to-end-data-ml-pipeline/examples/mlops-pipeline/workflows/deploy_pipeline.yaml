@@ -33,7 +33,7 @@ deploy_pipeline:
             InstanceType: ml.m5.large
             VolumeSizeInGB: 10
         AppSpecification:
-          ImageUri: "683313688378.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-scikit-learn:1.2-1"
+          ImageUri: "257758044811.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-scikit-learn:1.2-1"
           ContainerEntrypoint: ["python3", "/opt/ml/processing/src/deploy_model.py"]
           ContainerArguments:
             - "--model-package-group"
@@ -41,7 +41,7 @@ deploy_pipeline:
             - "--endpoint-name"
             - "{env.ENDPOINT_NAME}"
             - "--image-uri"
-            - "683313688378.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-xgboost:1.7-1"
+            - "257758044811.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-xgboost:1.7-1"
             - "--execution-role-arn"
             - "{proj.iam_role_arn}"
             - "--region"
