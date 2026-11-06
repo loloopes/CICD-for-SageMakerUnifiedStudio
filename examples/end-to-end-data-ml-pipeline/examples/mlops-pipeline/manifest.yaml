@@ -58,6 +58,8 @@ stages:
       region: ${DEV_DOMAIN_REGION}
     project:
       name: ${DEV_PROJECT_NAME:e2e-data-ml-ops-dev}
+      create: true
+      profileName: All capabilities
     environment_variables:
       ENDPOINT_NAME: bank-mktg-prediction-dev
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
@@ -99,6 +101,8 @@ stages:
       region: ${TEST_DOMAIN_REGION:us-east-1}
     project:
       name: ${TEST_PROJECT_NAME:e2e-data-ml-ops-test}
+      create: true
+      profileName: All capabilities
     environment_variables:
       ENDPOINT_NAME: bank-mktg-prediction-test
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
@@ -134,6 +138,8 @@ stages:
       region: ${PROD_DOMAIN_REGION:us-east-1}
     project:
       name: ${PROD_PROJECT_NAME:e2e-data-ml-ops-prod}
+      create: true
+      profileName: All capabilities
     environment_variables:
       ENDPOINT_NAME: bank-mktg-prediction-prod
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"

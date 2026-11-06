@@ -44,6 +44,9 @@ stages:
       region: ${DEV_DOMAIN_REGION}
     project:
       name: ${DEV_PROJECT_NAME:e2e-data-ml-ops-dev}
+      create: true
+      profileName: All capabilities
+
     environment_variables:
       ATHENA_DB_NAME: bank_mktg_dev
     bootstrap:
