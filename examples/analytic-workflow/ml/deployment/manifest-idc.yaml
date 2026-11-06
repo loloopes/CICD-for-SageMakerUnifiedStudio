@@ -29,6 +29,7 @@ stages:
     environment_variables:
       S3_PREFIX: test
       MODEL_NAME: "${MODEL_NAME:latest}"
+      BATCH_INPUT_FILE: "${BATCH_INPUT_FILE:input.csv}"
     deployment_configuration:
       storage:
       - name: deployment-code
@@ -60,6 +61,7 @@ stages:
     environment_variables:
       S3_PREFIX: prod
       MODEL_NAME: "${MODEL_NAME:latest}"
+      BATCH_INPUT_FILE: "${BATCH_INPUT_FILE:input.csv}"
     deployment_configuration:
       storage:
       - name: deployment-code

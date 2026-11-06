@@ -15,6 +15,7 @@ ml_deployment_workflow:
           python_version: "py3"
           inference_instance_type: "ml.m5.large"
           region: "{domain.region}"
+          batch_input_file: "{env.BATCH_INPUT_FILE}"
       output_config:
         output_formats: 
           ['NOTEBOOK']
