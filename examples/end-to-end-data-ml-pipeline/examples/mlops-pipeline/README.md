@@ -38,7 +38,7 @@ Model **approval** drives deployment: approving a version fires EventBridge → 
 ```bash
 pip install aws-smus-cicd-cli
 export DEV_DOMAIN_REGION=<your-region>      # required
-export DEV_PROJECT_NAME=<your-dev-project>  # optional (default: e2e-data-ml-ops-dev)
+export DEV_PROJECT_NAME=<your-dev-project>  # optional (default: e2e-data-stack-ml-ops-dev)
 ```
 
 An MLflow tracking server must exist (the manifest bootstrap creates the MLflow connection; `MLFLOW_TRACKING_SERVER_NAME` defaults to `smus-integration-mlflow-us-east-1`). Account ID and domain are resolved at runtime — see the [parent e2e example README](../../README.md#prerequisites) for the full variable list and CI/CD setup.

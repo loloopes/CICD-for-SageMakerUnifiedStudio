@@ -45,6 +45,11 @@ jobs:
       DEV_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
       TEST_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
       PROD_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
+      DEV_PROJECT_NAME: ${{ vars.DEV_PROJECT_NAME || 'e2e-data-stack-ml-ops-dev' }}
+      TEST_PROJECT_NAME: ${{ vars.TEST_PROJECT_NAME || 'e2e-data-stack-ml-ops-test' }}
+      PROD_PROJECT_NAME: ${{ vars.PROD_PROJECT_NAME || 'e2e-data-stack-ml-ops-prod' }}
+      DOMAIN_TAG_PURPOSE: ${{ vars.DOMAIN_TAG_PURPOSE }}
+      MLFLOW_TRACKING_SERVER_NAME: ${{ vars.MLFLOW_TRACKING_SERVER_NAME }}
     steps:
       - uses: actions/checkout@v4
 

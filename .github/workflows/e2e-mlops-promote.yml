@@ -53,9 +53,9 @@ env:
   PROD_ROLE_SECRET: AWS_ROLE_ARN_PROD
   # SMUS project names consumed by the CLI (manifest ${..} substitution
   # and mlops_helper.py), shared by every deploy job.
-  DEV_PROJECT_NAME: ${{ vars.DEV_PROJECT_NAME || 'e2e-data-ml-ops-dev' }}
-  TEST_PROJECT_NAME: ${{ vars.TEST_PROJECT_NAME || 'e2e-data-ml-ops-test' }}
-  PROD_PROJECT_NAME: ${{ vars.PROD_PROJECT_NAME || 'e2e-data-ml-ops-prod' }}
+  DEV_PROJECT_NAME: ${{ vars.DEV_PROJECT_NAME || 'e2e-data-stack-ml-ops-dev' }}
+  TEST_PROJECT_NAME: ${{ vars.TEST_PROJECT_NAME || 'e2e-data-stack-ml-ops-test' }}
+  PROD_PROJECT_NAME: ${{ vars.PROD_PROJECT_NAME || 'e2e-data-stack-ml-ops-prod' }}
   MLFLOW_TRACKING_SERVER_NAME: ${{ vars.MLFLOW_TRACKING_SERVER_NAME || 'smus-integration-mlflow-us-east-1' }}
   MLFLOW_TRACKING_SERVER_ARN: ${{ vars.MLFLOW_TRACKING_SERVER_ARN }}
 

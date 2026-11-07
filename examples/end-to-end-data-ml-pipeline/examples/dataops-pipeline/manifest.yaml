@@ -43,7 +43,7 @@ stages:
         purpose: ${DOMAIN_TAG_PURPOSE:smus-cicd-testing}
       region: ${DEV_DOMAIN_REGION}
     project:
-      name: ${DEV_PROJECT_NAME:e2e-data-ml-ops-dev}
+      name: ${DEV_PROJECT_NAME:e2e-data-stack-ml-ops-dev}
       create: true
       profileName: All capabilities
 

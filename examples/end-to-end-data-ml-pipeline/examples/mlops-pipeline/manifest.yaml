@@ -57,7 +57,7 @@ stages:
         purpose: ${DOMAIN_TAG_PURPOSE:smus-cicd-testing}
       region: ${DEV_DOMAIN_REGION}
     project:
-      name: ${DEV_PROJECT_NAME:e2e-data-ml-ops-dev}
+      name: ${DEV_PROJECT_NAME:e2e-data-stack-ml-ops-dev}
       create: true
       profileName: All capabilities
     environment_variables:
@@ -100,7 +100,7 @@ stages:
         purpose: ${DOMAIN_TAG_PURPOSE:smus-cicd-testing}
       region: ${TEST_DOMAIN_REGION:us-east-1}
     project:
-      name: ${TEST_PROJECT_NAME:e2e-data-ml-ops-test}
+      name: ${TEST_PROJECT_NAME:e2e-data-stack-ml-ops-test}
       create: true
       profileName: All capabilities
     environment_variables:
@@ -137,7 +137,7 @@ stages:
         purpose: ${DOMAIN_TAG_PURPOSE:smus-cicd-testing}
       region: ${PROD_DOMAIN_REGION:us-east-1}
     project:
-      name: ${PROD_PROJECT_NAME:e2e-data-ml-ops-prod}
+      name: ${PROD_PROJECT_NAME:e2e-data-stack-ml-ops-prod}
       create: true
       profileName: All capabilities
     environment_variables:

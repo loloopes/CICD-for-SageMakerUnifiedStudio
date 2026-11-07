@@ -201,7 +201,7 @@ These are the same values configured as GitHub variables/secrets for CI (the sou
 ```bash
 # DataOps (dev stage only):
 export DEV_DOMAIN_REGION=<your-region>               # required
-export DEV_PROJECT_NAME=<your-dev-project>           # optional (default: e2e-data-ml-ops-dev)
+export DEV_PROJECT_NAME=<your-dev-project>           # optional (default: e2e-data-stack-ml-ops-dev)
 export DOMAIN_TAG_PURPOSE=<your-domain-purpose-tag>  # optional (default: smus-cicd-testing)
 
 # MLOps also deploys test/prod, so additionally export (all optional, have defaults):
@@ -263,7 +263,7 @@ cd examples/end-to-end-data-ml-pipeline
 ./scripts/setup-github-oidc.sh     # GitHub OIDC provider + IAM role for CI/CD
 ```
 
-Because every stage uses the same OIDC role (`AWS_ROLE_ARN_DEV`), that role must be a **member/owner** of each SMUS project it deploys to (`e2e-data-ml-ops-dev`, `-test`, `-prod`). The deploying role automatically becomes the owner of any project it creates; for pre-existing projects, add the role as a member so it can list connections and deploy. (If it is only a member of the dev project, only `dev` deploys succeed.)
+Because every stage uses the same OIDC role (`AWS_ROLE_ARN_DEV`), that role must be a **member/owner** of each SMUS project it deploys to (`e2e-data-stack-ml-ops-dev`, `-test`, `-prod`). The deploying role automatically becomes the owner of any project it creates; for pre-existing projects, add the role as a member so it can list connections and deploy. (If it is only a member of the dev project, only `dev` deploys succeed.)
 
 ### Deploy and promote flow
 
@@ -335,7 +335,7 @@ Some values are derived at runtime and do not need to be set:
 | Variable | Scope | Purpose |
 | -------- | ----- | ------- |
 | `DOMAIN_REGION` | environment (`dev-aws-account`) | Region for all stages (feeds `*_DOMAIN_REGION`) |
-| `DEV_PROJECT_NAME` / `TEST_PROJECT_NAME` / `PROD_PROJECT_NAME` | repo | SMUS project per stage (optional; manifest and workflows default to `e2e-data-ml-ops-{dev,test,prod}`) |
+| `DEV_PROJECT_NAME` / `TEST_PROJECT_NAME` / `PROD_PROJECT_NAME` | repo | SMUS project per stage (optional; manifest and workflows default to `e2e-data-stack-ml-ops-{dev,test,prod}`) |
 | `MLFLOW_TRACKING_SERVER_NAME` | repo/environment | MLflow tracking server name (optional; manifest has a default) |
 | `DOMAIN_TAG_PURPOSE` | repo/environment | Optional override for the domain `purpose` tag (defaults to `smus-cicd-testing`) |
 

@@ -40,9 +40,9 @@ env:
   TEST_ENVIRONMENT: dev-aws-account
   PROD_ENVIRONMENT: dev-aws-account
   # SMUS_ prefix keeps these from being read as the CLI's manifest *_PROJECT_NAME vars.
-  SMUS_DEV_PROJECT_NAME: e2e-data-ml-ops-dev
-  SMUS_TEST_PROJECT_NAME: e2e-data-ml-ops-test
-  SMUS_PROD_PROJECT_NAME: e2e-data-ml-ops-prod
+  SMUS_DEV_PROJECT_NAME: ${{ vars.DEV_PROJECT_NAME || 'e2e-data-stack-ml-ops-dev' }}
+  SMUS_TEST_PROJECT_NAME: ${{ vars.TEST_PROJECT_NAME || 'e2e-data-stack-ml-ops-test' }}
+  SMUS_PROD_PROJECT_NAME: ${{ vars.PROD_PROJECT_NAME || 'e2e-data-stack-ml-ops-prod' }}
   # OIDC role secret name per stage (single account today -> all AWS_ROLE_ARN_DEV).
   # Point a stage at its own account by changing just its secret name here.
   DEV_ROLE_SECRET: AWS_ROLE_ARN_DEV
