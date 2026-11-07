@@ -17,6 +17,11 @@ Parameters:
       - Small
       - Medium
       - Large
+  # SMUS project / training job execution role ({proj.iam_role_arn} in DAGs).
+  # Pass the ProjectRoleName used in stage-roles.yaml (e.g. e2e-data-ml-ops-dev-role).
+  ProjectExecutionRoleName:
+    Type: String
+    Description: IAM role name used by SageMaker training/processing jobs in the SMUS project
 
 Resources:
   MLflowArtifactsBucket:
@@ -30,6 +35,48 @@ Resources:
         RestrictPublicBuckets: true
       VersioningConfiguration:
         Status: Enabled
+
+  # Attach to the project/training job role so jobs can call MLflow and
+  # write artifacts when uploads are not fully covered by tracking-server
+  # presigned URLs. Distinct from SageMakerExecutionRole (tracking server).
+  MLflowArtifactsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: MLflowArtifactsAccess
+      Roles:
+        - !Ref ProjectExecutionRoleName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: MLflowArtifactBucketAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:AbortMultipartUpload
+              - s3:ListMultipartUploadParts
+            Resource:
+              - !Sub '${MLflowArtifactsBucket.Arn}'
+              - !Sub '${MLflowArtifactsBucket.Arn}/*'
+          - Sid: MLflowArtifactBucketKms
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub 's3.${AWS::Region}.amazonaws.com'
+          - Sid: MLflowClientApis
+            Effect: Allow
+            Action:
+              - sagemaker-mlflow:*
+              - sagemaker:CreatePresignedMlflowTrackingServerUrl
+              - sagemaker:DescribeMlflowTrackingServer
+              - sagemaker:ListMlflowTrackingServers
+            Resource: '*'
 
   SageMakerExecutionRole:
     Type: AWS::IAM::Role
@@ -52,15 +99,27 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              # Tracking server issues presigned URLs and must write artifacts itself.
               - Effect: Allow
                 Action:
                   - s3:GetObject
                   - s3:PutObject
                   - s3:DeleteObject
                   - s3:ListBucket
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
                 Resource:
                   - !Sub '${MLflowArtifactsBucket.Arn}'
                   - !Sub '${MLflowArtifactsBucket.Arn}/*'
+              # Required when the artifact bucket uses SSE-KMS (SageMaker default).
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 's3.${AWS::Region}.amazonaws.com'
         - PolicyName: MLflowPermissions
           PolicyDocument:
             Version: 2012-10-17

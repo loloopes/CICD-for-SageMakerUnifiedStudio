@@ -6,16 +6,6 @@ Parameters:
     Type: String
     Description: Name of the project role (e.g., test-marketing-role, prod-marketing-role)
     AllowedPattern: ^[a-z0-9-]+-role$
-  
-  BedrockTestingPolicyArn:
-    Type: String
-    Description: ARN of the existing BedrockTestingPolicy managed policy
-    Default: 'arn:aws:iam::${AWS::AccountId}:policy/BedrockTestingPolicy'
-  
-  BedrockAgentPassRolePolicyArn:
-    Type: String
-    Description: ARN of the existing BedrockAgentPassRolePolicy managed policy
-    Default: 'arn:aws:iam::${AWS::AccountId}:policy/BedrockAgentPassRolePolicy'
 
 Resources:
   ProjectRole:
@@ -83,6 +73,20 @@ Resources:
                   - bedrock:GetAgent
                   - bedrock:ListAgents
                 Resource: '*'
+        # Client-side MLflow access for training/processing jobs using this
+        # project role ({proj.iam_role_arn}). Artifact-bucket S3/KMS grants
+        # are attached separately by shared-resources-template.yaml.
+        - PolicyName: MLflowClientAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker-mlflow:*
+                  - sagemaker:CreatePresignedMlflowTrackingServerUrl
+                  - sagemaker:DescribeMlflowTrackingServer
+                  - sagemaker:ListMlflowTrackingServers
+                Resource: '*'
         # Allow managing inline policies on the pre-created lambda role
         # The bedrock_agent_helper.py code dynamically adds inline policies for:
         # 1. sub_agent_policy - permissions to invoke sub-agents (if sub_agent_arns provided)
@@ -99,8 +103,9 @@ Resources:
                   - iam:DeleteRolePolicy
                 Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/test_agent-lambda-role-${AWS::Region}-${AWS::AccountId}'
       ManagedPolicyArns:
-        - !Ref BedrockTestingPolicyArn
-        - !Ref BedrockAgentPassRolePolicyArn
+        # Policies created by bedrock-roles.yaml (SMUSBedrockAgentRole stack)
+        - !Sub 'arn:aws:iam::${AWS::AccountId}:policy/BedrockTestingPolicy'
+        - !Sub 'arn:aws:iam::${AWS::AccountId}:policy/BedrockAgentPassRolePolicy'
         - arn:aws:iam::aws:policy/SageMakerStudioUserIAMPermissiveExecutionPolicy
       Tags:
         - Key: CreatedBy

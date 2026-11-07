@@ -69,6 +69,20 @@ Resources:
                   - bedrock:GetAgent
                   - bedrock:ListAgents
                 Resource: '*'
+        # Client-side MLflow access for training/processing jobs using this
+        # project role ({proj.iam_role_arn}). Artifact-bucket S3/KMS grants
+        # are attached separately by shared-resources-template.yaml.
+        - PolicyName: MLflowClientAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker-mlflow:*
+                  - sagemaker:CreatePresignedMlflowTrackingServerUrl
+                  - sagemaker:DescribeMlflowTrackingServer
+                  - sagemaker:ListMlflowTrackingServers
+                Resource: '*'
       ManagedPolicyArns:
         - !Ref BedrockTestingPolicy
         - !Ref BedrockAgentPassRolePolicy
