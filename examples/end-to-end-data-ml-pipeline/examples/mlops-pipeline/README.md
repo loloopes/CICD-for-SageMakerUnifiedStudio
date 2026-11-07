@@ -20,7 +20,7 @@ preprocess (GlueJobOperator)
 **`deploy_pipeline`** — deploys the approved model to an endpoint (event-driven):
 
 ```text
-deploy_model (SageMakerProcessingOperator → bank-mktg-prediction-<stage> endpoint)
+deploy_model (SageMakerProcessingOperator → stack-prediction-<stage> endpoint)
 ```
 
 | Step | Operator | Description |
@@ -28,7 +28,7 @@ deploy_model (SageMakerProcessingOperator → bank-mktg-prediction-<stage> endpo
 | `preprocess` | GlueJobOperator | Feature engineering from the DataOps Athena table; train/val/test split |
 | `train_model` | SageMakerTrainingOperator | XGBoost training via `train_xgboost.py` (script mode) with MLflow tracking |
 | `evaluate_model` | SageMakerProcessingOperator | Batch evaluation on the held-out test set (`evaluate_model.py`) |
-| `register_model` | SageMakerRegisterModelVersionOperator | Registers a version in `bank-mktg-prediction-models` as `PendingManualApproval` |
+| `register_model` | SageMakerRegisterModelVersionOperator | Registers a version in `stack-prediction-models` as `PendingManualApproval` |
 | `deploy_model` | SageMakerProcessingOperator | Creates/updates the prediction endpoint (`deploy_model.py`) |
 
 Model **approval** drives deployment: approving a version fires EventBridge → Lambda → GitHub Actions → `deploy_pipeline`. See the [parent README](../../README.md#deploy-trigger-behavior) for details.
@@ -85,9 +85,9 @@ mlops-pipeline/
 Stage-prefixed, timestamped names keep runs isolated across stages and reruns:
 
 ```text
-Training job     : bank-mktg-xgb-<timestamp>
-Model package    : bank-mktg-prediction-models (registry group, versioned)
-Endpoint         : bank-mktg-prediction-<stage>   (e.g. bank-mktg-prediction-dev)
+Training job     : stack-xgb-<timestamp>
+Model package    : stack-prediction-models (registry group, versioned)
+Endpoint         : stack-prediction-<stage>   (e.g. stack-prediction-dev)
 ```
 
 ## Validation

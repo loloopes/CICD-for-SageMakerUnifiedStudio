@@ -68,7 +68,7 @@ flowchart TD
         Lambda[Lambda]:::hook
         GHA[GitHub Actions]:::info
         DAG[deploy_pipeline]:::process
-        EP[Prediction Endpoint<br/>bank-mktg-prediction-&lt;stage&gt;]:::alert
+        EP[Prediction Endpoint<br/>stack-prediction-&lt;stage&gt;]:::alert
         Approve --> EB --> Lambda --> GHA --> DAG --> EP
     end
 
@@ -103,7 +103,7 @@ The coupling points:
 - **DataOps → MLOps:** Glue Data Catalog. DataOps writes to `bank_mktg_<stage>.campaign_results`, MLOps reads from it.
 - **MLOps → Deploy:** SageMaker Model Registry. Training registers models as `PendingManualApproval`. Every approval triggers deployment via EventBridge → Lambda → GitHub Actions → deploy_pipeline DAG.
 
-Stage-prefixed names (`bank_mktg_dev`, `bank-mktg-prediction-dev`) ensure complete namespace isolation across environments.
+Stage-prefixed names (`bank_mktg_dev`, `stack-prediction-dev`) ensure complete namespace isolation across environments.
 
 ### Deploy trigger behavior
 
@@ -285,7 +285,7 @@ gh workflow run e2e-mlops-pipeline.yml --ref main -f stages=all -f setup_infra=t
 
 #### 7. Train and register a model
 
-The deployed training DAG runs on schedule (or trigger it) in dev's project, trains the XGBoost model, and registers it in the `bank-mktg-prediction-models` registry as `PendingManualApproval`.
+The deployed training DAG runs on schedule (or trigger it) in dev's project, trains the XGBoost model, and registers it in the `stack-prediction-models` registry as `PendingManualApproval`.
 
 #### 8. Approve the model → automatic promote cascade
 
@@ -391,7 +391,7 @@ After these edits each stage authenticates to, and deploys into, its own account
 
 ```bash
 aws secretsmanager create-secret \
-  --name bank-mktg/github-token \
+  --name stack/github-token \
   --secret-string 'ghp_your_token_here'
 ```
 
@@ -410,7 +410,7 @@ cd examples/end-to-end-data-ml-pipeline
 
 The script is idempotent — re-running it updates the existing Lambda code and configuration. **Re-run it after any change to the trigger logic** (it calls `update-function-code`), since the deployed Lambda does not update automatically. In CI this happens on every MLOps training run.
 
-Once provisioned, the rule is `ENABLED` immediately. Approving a model version in `bank-mktg-prediction-models` then triggers the dev → test → prod promote cascade through GitHub Actions. See [Deploy trigger behavior](#deploy-trigger-behavior) for how the trigger handles approvals and avoids re-deploy loops.
+Once provisioned, the rule is `ENABLED` immediately. Approving a model version in `stack-prediction-models` then triggers the dev → test → prod promote cascade through GitHub Actions. See [Deploy trigger behavior](#deploy-trigger-behavior) for how the trigger handles approvals and avoids re-deploy loops.
 
 ## CLI Commands
 
@@ -422,7 +422,7 @@ This example drives the `aws-smus-cicd-cli` (`describe`, `deploy`, `run`, `monit
 ├── examples/
 │   ├── dataops-pipeline/              # DataOps: Glue ETL + Athena
 │   │   ├── manifest.yaml
-│   │   ├── data/bank-mktg-sample.csv
+│   │   ├── data/stack-sample.csv
 │   │   ├── workflows/data_pipeline.yaml
 │   │   └── src/
 │   │       ├── glue-jobs/*.py

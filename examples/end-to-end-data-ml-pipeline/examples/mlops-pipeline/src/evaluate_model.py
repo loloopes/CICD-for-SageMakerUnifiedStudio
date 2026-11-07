@@ -8,8 +8,8 @@ This script is designed to run as a SageMaker Processing job via the
 SageMakerProcessingOperator in the training pipeline workflow.
 
 Arguments (passed via --arg=value):
-    --training-job-prefix: Prefix for training job names (e.g., bank-mktg-xgb)
-    --model-prefix: Prefix for model names (e.g., bank-mktg-model)
+    --training-job-prefix: Prefix for training job names (e.g., stack-xgb)
+    --model-prefix: Prefix for model names (e.g., stack-model)
     --image-uri: XGBoost container image URI
     --execution-role-arn: SageMaker execution role ARN
     --region: AWS region
@@ -286,7 +286,7 @@ def main():
     # Step 3: Prepare inference data and run batch transform
     inference_data_path = prepare_inference_data(s3, args.test_data_path, model_name)
     eval_output_prefix = args.output_path.rstrip("/") + f"/{model_name}/"
-    transform_job_name = f"bank-mktg-eval{suffix}"
+    transform_job_name = f"stack-eval{suffix}"
 
     run_batch_transform(sm, transform_job_name, model_name, inference_data_path, eval_output_prefix)
 

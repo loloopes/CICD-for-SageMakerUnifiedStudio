@@ -59,10 +59,10 @@ stages:
       storage:
         - name: src
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/src
+          targetDirectory: stack/data_pipeline/src
         - name: workflows
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/workflows
+          targetDirectory: stack/data_pipeline/workflows
         - name: data
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/data
+          targetDirectory: stack/data_pipeline/data

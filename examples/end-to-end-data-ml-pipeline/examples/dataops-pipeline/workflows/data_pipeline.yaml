@@ -21,15 +21,15 @@ data_pipeline:
   tasks:
     ingest_bank_data:
       operator: airflow.providers.amazon.aws.operators.glue.GlueJobOperator
-      job_name: bank-mktg-ingest-raw
+      job_name: stack-ingest-raw
       iam_role_name: "{proj.iam_role_name}"
       s3_bucket: "{proj.connection.default.s3_shared.bucket_name}"
       region_name: "{domain.region}"
       update_config: true
-      script_location: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/src/glue-jobs/glue_ingest_raw_data.py"
+      script_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/src/glue-jobs/glue_ingest_raw_data.py"
       script_args:
-        --source_path: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/data/bank-mktg-sample.csv"
-        --target_path: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/output/staging/"
+        --source_path: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/data/stack-sample.csv"
+        --target_path: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/staging/"
         --data_type: "bank_mktg"
       create_job_kwargs:
         GlueVersion: "4.0"
@@ -39,15 +39,15 @@ data_pipeline:
 
     transform_aggregate:
       operator: airflow.providers.amazon.aws.operators.glue.GlueJobOperator
-      job_name: bank-mktg-transform
+      job_name: stack-transform
       iam_role_name: "{proj.iam_role_name}"
       s3_bucket: "{proj.connection.default.s3_shared.bucket_name}"
       region_name: "{domain.region}"
       update_config: true
-      script_location: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/src/glue-jobs/glue_transform_aggregate.py"
+      script_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/src/glue-jobs/glue_transform_aggregate.py"
       script_args:
-        --staging_path: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/output/staging/"
-        --analytics_path: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/output/transformed/"
+        --staging_path: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/staging/"
+        --analytics_path: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/transformed/"
       create_job_kwargs:
         GlueVersion: "4.0"
         NumberOfWorkers: 4
@@ -57,16 +57,16 @@ data_pipeline:
 
     data_quality_checks:
       operator: airflow.providers.amazon.aws.operators.glue.GlueJobOperator
-      job_name: bank-mktg-data-quality
+      job_name: stack-data-quality
       iam_role_name: "{proj.iam_role_name}"
       s3_bucket: "{proj.connection.default.s3_shared.bucket_name}"
       region_name: "{domain.region}"
       update_config: true
-      script_location: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/src/glue-jobs/glue_data_quality_checks.py"
+      script_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/src/glue-jobs/glue_data_quality_checks.py"
       script_args:
-        --analytics_path: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/output/transformed/"
+        --analytics_path: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/transformed/"
         --report_date: "{{ ds }}"
-        --dq_results_path: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/output/quality_reports"
+        --dq_results_path: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/quality_reports"
       create_job_kwargs:
         GlueVersion: "4.0"
         NumberOfWorkers: 2
@@ -79,7 +79,7 @@ data_pipeline:
       aws_conn_id: aws_default
       database: default
       query: CREATE DATABASE IF NOT EXISTS bank_mktg_dev
-      output_location: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/output/athena_results/"
+      output_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/athena_results/"
       dependencies:
         - data_quality_checks
 
@@ -114,8 +114,8 @@ data_pipeline:
           contacted_before INT
         )
         STORED AS PARQUET
-        LOCATION '{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/output/transformed/'
-      output_location: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/output/athena_results/"
+        LOCATION '{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/transformed/'
+      output_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/athena_results/"
       dependencies:
         - create_athena_database
 
@@ -124,6 +124,6 @@ data_pipeline:
       aws_conn_id: aws_default
       database: "bank_mktg_dev"
       query: MSCK REPAIR TABLE campaign_results
-      output_location: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/output/athena_results/"
+      output_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/athena_results/"
       dependencies:
         - create_athena_table

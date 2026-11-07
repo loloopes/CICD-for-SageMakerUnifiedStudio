@@ -56,7 +56,7 @@ def parse_args():
 
     # MLflow tracking
     parser.add_argument("--tracking_server_arn", type=str, default=os.environ.get("MLFLOW_TRACKING_ARN", ""))
-    parser.add_argument("--experiment_name", type=str, default="bank-mktg-experiments")
+    parser.add_argument("--experiment_name", type=str, default="stack-experiments")
 
     # SageMaker environment
     parser.add_argument("--model_dir", type=str, default=os.environ.get("SM_MODEL_DIR", "/opt/ml/model"))

@@ -53,7 +53,7 @@ dataops-pipeline/
 │   ├── glue_transform_aggregate.py  # Adds age_group, contacted_before columns
 │   └── glue_data_quality_checks.py  # Validates null rates, row counts
 └── data/
-    └── bank-mktg-sample.csv         # Sample dataset (~41K rows)
+    └── stack-sample.csv         # Sample dataset (~41K rows)
 ```
 
 ## How It Works

@@ -77,9 +77,9 @@ jobs:
           {
             echo "### Training pipeline finished"
             echo ""
-            echo "A new model version should be in \`bank-mktg-prediction-models\` as \`PendingManualApproval\`."
+            echo "A new model version should be in \`stack-prediction-models\` as \`PendingManualApproval\`."
             echo ""
             echo "Next: approve that version in the SageMaker Model Registry to trigger **E2E MLOps Promotion**."
             echo ""
-            echo "MLflow: experiment \`bank-mktg-experiments\` → look for a new \`bank-mktg-xgb-…\` / \`evaluate-…\` run."
+            echo "MLflow: experiment \`stack-experiments\` → look for a new \`stack-xgb-…\` / \`evaluate-…\` run."
           } >> "$GITHUB_STEP_SUMMARY"

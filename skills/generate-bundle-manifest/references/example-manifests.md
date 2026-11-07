@@ -60,13 +60,13 @@ stages:
       storage:
         - name: src
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/src
+          targetDirectory: stack/data_pipeline/src
         - name: workflows
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/workflows
+          targetDirectory: stack/data_pipeline/workflows
         - name: data
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/data
+          targetDirectory: stack/data_pipeline/data
 
   test:
     stage: TEST
@@ -91,13 +91,13 @@ stages:
       storage:
         - name: src
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/src
+          targetDirectory: stack/data_pipeline/src
         - name: workflows
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/workflows
+          targetDirectory: stack/data_pipeline/workflows
         - name: data
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/data
+          targetDirectory: stack/data_pipeline/data
 
   prod:
     stage: PROD
@@ -119,13 +119,13 @@ stages:
       storage:
         - name: src
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/src
+          targetDirectory: stack/data_pipeline/src
         - name: workflows
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/workflows
+          targetDirectory: stack/data_pipeline/workflows
         - name: data
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/data_pipeline/data
+          targetDirectory: stack/data_pipeline/data
 ```
 
 ### Matching Orchestration Workflow (`workflows/data_pipeline.yaml`)
@@ -147,7 +147,7 @@ data_pipeline:
       s3_bucket: "{proj.connection.default.s3_shared.bucket_name}"
       region_name: "{domain.region}"
       update_config: true
-      script_location: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/src/glue-jobs/ingest.py"
+      script_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/src/glue-jobs/ingest.py"
       create_job_kwargs:
         GlueVersion: "{proj.connection.default.spark.glueVersion}"
         NumberOfWorkers: 2
@@ -160,7 +160,7 @@ data_pipeline:
       s3_bucket: "{proj.connection.default.s3_shared.bucket_name}"
       region_name: "{domain.region}"
       update_config: true
-      script_location: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/src/glue-jobs/transform.py"
+      script_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/src/glue-jobs/transform.py"
       create_job_kwargs:
         GlueVersion: "{proj.connection.default.spark.glueVersion}"
         NumberOfWorkers: 4
@@ -174,7 +174,7 @@ data_pipeline:
       s3_bucket: "{proj.connection.default.s3_shared.bucket_name}"
       region_name: "{domain.region}"
       update_config: true
-      script_location: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/src/glue-jobs/quality_checks.py"
+      script_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/src/glue-jobs/quality_checks.py"
       create_job_kwargs:
         GlueVersion: "{proj.connection.default.spark.glueVersion}"
         NumberOfWorkers: 2
@@ -190,8 +190,8 @@ data_pipeline:
           id INT, name STRING, value DOUBLE
         )
         STORED AS PARQUET
-        LOCATION '{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/output/'
-      output_location: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/athena_results/"
+        LOCATION '{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/'
+      output_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/athena_results/"
       dependencies: [quality_checks]
 ```
 

@@ -9,8 +9,8 @@
 #   ./scripts/setup-mlops-infra.sh <dev|test|prod> <account-id> <region> <project-name>
 #
 # Examples:
-#   ./scripts/setup-mlops-infra.sh dev 973414239152 us-east-1 bank-mktg-dev
-#   ./scripts/setup-mlops-infra.sh prod 987654321098 us-west-2 bank-mktg-prod
+#   ./scripts/setup-mlops-infra.sh dev 973414239152 us-east-1 stack-dev
+#   ./scripts/setup-mlops-infra.sh prod 987654321098 us-west-2 stack-prod
 #
 # What it creates:
 #   1. Deploy Trigger (Lambda function, EventBridge rule, IAM role)
@@ -53,10 +53,10 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  Event-Based Deploy Trigger"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-FUNCTION_NAME="bank-mktg-airflow-deploy-trigger"
-RULE_NAME="bank-mktg-model-approved"
-LAMBDA_ROLE_NAME="bank-mktg-airflow-deploy-trigger-role"
-MODEL_PACKAGE_GROUP="bank-mktg-prediction-models"
+FUNCTION_NAME="stack-airflow-deploy-trigger"
+RULE_NAME="stack-model-approved"
+LAMBDA_ROLE_NAME="stack-airflow-deploy-trigger-role"
+MODEL_PACKAGE_GROUP="stack-prediction-models"
 
 # Step 1.1: Create Lambda execution role
 echo ""
@@ -98,7 +98,7 @@ LAMBDA_POLICY=$(cat <<EOF
       "Sid": "SecretsManager",
       "Effect": "Allow",
       "Action": ["secretsmanager:GetSecretValue"],
-      "Resource": "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:bank-mktg/github-token*"
+      "Resource": "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:stack/github-token*"
     }
   ]
 }
@@ -130,7 +130,7 @@ the dev -> test -> prod promotion cascade (mlops-promote.yml).
 Environment Variables:
   GITHUB_TOKEN_SECRET_ARN - Secrets Manager ARN for GitHub PAT
   GITHUB_REPO             - GitHub repo (owner/repo format)
-  PROJECT_NAME            - Project name to derive stage (e.g., bank-mktg-dev → dev)
+  PROJECT_NAME            - Project name to derive stage (e.g., stack-dev → dev)
 """
 import json
 import logging
@@ -184,13 +184,13 @@ def handler(event, context):
 
     # Configuration
     github_repo = os.environ.get("GITHUB_REPO", "")
-    project_name = os.environ.get("PROJECT_NAME", "bank-mktg-dev")
+    project_name = os.environ.get("PROJECT_NAME", "stack-dev")
 
     # Derive stage from project name
     stage = project_name.rsplit("-", 1)[-1]
 
     model_package_arn = detail.get("ModelPackageArn", "")
-    model_package_group = detail.get("ModelPackageGroupName", "bank-mktg-prediction-models")
+    model_package_group = detail.get("ModelPackageGroupName", "stack-prediction-models")
 
     logger.info(f"Model approved: {model_package_arn}")
     logger.info(f"Triggering deploy for stage: {stage}")
@@ -252,7 +252,7 @@ if [[ "$GITHUB_REPO" != */* ]]; then
   echo "ERROR: GITHUB_REPO must be in 'owner/repo' format (got: '$GITHUB_REPO')." >&2
   exit 1
 fi
-GITHUB_TOKEN_SECRET_ARN="arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:bank-mktg/github-token"
+GITHUB_TOKEN_SECRET_ARN="arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:stack/github-token"
 
 if aws lambda get-function --function-name "$FUNCTION_NAME" &>/dev/null; then
   aws lambda update-function-code \
@@ -356,7 +356,7 @@ echo ""
 echo "Prerequisites:"
 echo "  1. Store a GitHub PAT in Secrets Manager:"
 echo "     aws secretsmanager create-secret \\"
-echo "       --name bank-mktg/github-token \\"
+echo "       --name stack/github-token \\"
 echo "       --secret-string 'ghp_your_token_here'"
 echo ""
 echo "Next steps:"

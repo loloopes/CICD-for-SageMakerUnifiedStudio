@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MLOps helper - consolidated CLI for the bank-mktg promotion pipeline.
+MLOps helper - consolidated CLI for the stack promotion pipeline.
 
 Subcommands:
     select-package         Pick latest Approved model package version.
@@ -452,7 +452,7 @@ def cmd_capture_deploy_logs(args: argparse.Namespace) -> int:
 # =============================================================================
 
 
-# Built-in feature row sample. Edit if the bank-mktg processed feature schema
+# Built-in feature row sample. Edit if the stack processed feature schema
 # changes. Two rows so we can verify scoring works on a tiny batch.
 DEFAULT_SAMPLE = (
     "0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6\n"
@@ -582,7 +582,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--region", required=True)
     sp.add_argument(
         "--target-prefix",
-        default="shared/bank-mktg/mlops_pipeline/promoted-models",
+        default="shared/stack/mlops_pipeline/promoted-models",
         help=(
             "Path under the target project's default.s3_shared connection. "
             "A leading 'shared/' is dropped when that connection URI already "
@@ -593,7 +593,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("check-deploy-status", help="Verify latest deploy processing job.")
     sp.add_argument("--region", required=True)
-    sp.add_argument("--name-prefix", default="bank-mktg-deploy")
+    sp.add_argument("--name-prefix", default="stack-deploy")
     sp.add_argument(
         "--endpoint-name",
         default="",
@@ -605,7 +605,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("capture-deploy-logs", help="Dump latest deploy job's logs.")
     sp.add_argument("--region", required=True)
     sp.add_argument("--output-dir", required=True)
-    sp.add_argument("--name-prefix", default="bank-mktg-deploy")
+    sp.add_argument("--name-prefix", default="stack-deploy")
     sp.add_argument("--max-age-minutes", type=int, default=60)
     sp.set_defaults(func=cmd_capture_deploy_logs)
 

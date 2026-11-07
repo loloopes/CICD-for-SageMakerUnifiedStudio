@@ -61,7 +61,7 @@ stages:
       create: true
       profileName: All capabilities
     environment_variables:
-      ENDPOINT_NAME: bank-mktg-prediction-dev
+      ENDPOINT_NAME: stack-prediction-dev
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
       MODEL_PACKAGE_ARN: "${MODEL_PACKAGE_ARN:none}"
       MODEL_DATA_URL_OVERRIDE: "${MODEL_DATA_URL_OVERRIDE:none}"
@@ -84,13 +84,13 @@ stages:
       storage:
         - name: src
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/mlops_pipeline/src
+          targetDirectory: stack/mlops_pipeline/src
         - name: workflows
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/mlops_pipeline/workflows
+          targetDirectory: stack/mlops_pipeline/workflows
         - name: train_model_sourcedir
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/mlops_pipeline/src
+          targetDirectory: stack/mlops_pipeline/src
           compression: tar.gz
 
   test:
@@ -104,7 +104,7 @@ stages:
       create: true
       profileName: All capabilities
     environment_variables:
-      ENDPOINT_NAME: bank-mktg-prediction-test
+      ENDPOINT_NAME: stack-prediction-test
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
       MODEL_PACKAGE_ARN: "${MODEL_PACKAGE_ARN:none}"
       MODEL_DATA_URL_OVERRIDE: "${MODEL_DATA_URL_OVERRIDE:none}"
@@ -125,10 +125,10 @@ stages:
       storage:
         - name: src
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/mlops_pipeline/src
+          targetDirectory: stack/mlops_pipeline/src
         - name: workflows
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/mlops_pipeline/workflows
+          targetDirectory: stack/mlops_pipeline/workflows
 
   prod:
     stage: PROD
@@ -141,7 +141,7 @@ stages:
       create: true
       profileName: All capabilities
     environment_variables:
-      ENDPOINT_NAME: bank-mktg-prediction-prod
+      ENDPOINT_NAME: stack-prediction-prod
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
       MODEL_PACKAGE_ARN: "${MODEL_PACKAGE_ARN:none}"
       MODEL_DATA_URL_OVERRIDE: "${MODEL_DATA_URL_OVERRIDE:none}"
@@ -162,7 +162,7 @@ stages:
       storage:
         - name: src
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/mlops_pipeline/src
+          targetDirectory: stack/mlops_pipeline/src
         - name: workflows
           connectionName: default.s3_shared
-          targetDirectory: bank-mktg/mlops_pipeline/workflows
+          targetDirectory: stack/mlops_pipeline/workflows

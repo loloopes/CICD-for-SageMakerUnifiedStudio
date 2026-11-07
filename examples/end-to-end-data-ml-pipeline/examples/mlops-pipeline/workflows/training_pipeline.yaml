@@ -20,15 +20,15 @@ training_pipeline:
     preprocess:
       operator: airflow.providers.amazon.aws.operators.glue.GlueJobOperator
       retries: 0
-      job_name: bank-mktg-preprocess
-      script_location: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/src/feature_engineering.py"
+      job_name: stack-preprocess
+      script_location: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/src/feature_engineering.py"
       s3_bucket: "{proj.connection.default.s3_shared.bucket_name}"
       iam_role_name: "{proj.iam_role_name}"
       region_name: "{domain.region}"
       update_config: true
       script_args:
-        "--INPUT_PATH": "{proj.connection.default.s3_shared.s3Uri}bank-mktg/data_pipeline/output/transformed/"
-        "--OUTPUT_PATH": "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/data/bank_mktg/features/"
+        "--INPUT_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/transformed/"
+        "--OUTPUT_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/data/bank_mktg/features/"
         "--CATALOG_DB": "bank_mktg_dev"
         "--TABLE_PREFIX": "features"
         "--TRAIN_RATIO": "0.70"
@@ -50,7 +50,7 @@ training_pipeline:
       wait_for_completion: true
       print_log: true
       config:
-        TrainingJobName: 'bank-mktg-xgb-{{ ts_nodash }}'
+        TrainingJobName: 'stack-xgb-{{ ts_nodash }}'
         AlgorithmSpecification:
           TrainingImage: "257758044811.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-xgboost:1.7-1"
           TrainingInputMode: File
@@ -60,18 +60,18 @@ training_pipeline:
             DataSource:
               S3DataSource:
                 S3DataType: S3Prefix
-                S3Uri: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/data/bank_mktg/features/train/"
+                S3Uri: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/data/bank_mktg/features/train/"
                 S3DataDistributionType: FullyReplicated
             ContentType: text/csv
           - ChannelName: validation
             DataSource:
               S3DataSource:
                 S3DataType: S3Prefix
-                S3Uri: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/data/bank_mktg/features/validation/"
+                S3Uri: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/data/bank_mktg/features/validation/"
                 S3DataDistributionType: FullyReplicated
             ContentType: text/csv
         OutputDataConfig:
-          S3OutputPath: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/models/"
+          S3OutputPath: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/models/"
         ResourceConfig:
           InstanceType: ml.m5.large
           InstanceCount: 1
@@ -80,9 +80,9 @@ training_pipeline:
           MaxRuntimeInSeconds: 3600
         HyperParameters:
           sagemaker_program: "train_xgboost.py"
-          sagemaker_submit_directory: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/src/train_model_sourcedir.tar.gz"
+          sagemaker_submit_directory: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/src/train_model_sourcedir.tar.gz"
           tracking_server_arn: "{proj.connection.mlflow-tracking.trackingServerArn}"
-          experiment_name: "bank-mktg-experiments"
+          experiment_name: "stack-experiments"
           objective: "binary:logistic"
           eval_metric: "auc"
           num_round: "200"
@@ -101,7 +101,7 @@ training_pipeline:
       wait_for_completion: true
       print_log: true
       config:
-        ProcessingJobName: 'bank-mktg-eval-{{ ts_nodash }}'
+        ProcessingJobName: 'stack-eval-{{ ts_nodash }}'
         ProcessingResources:
           ClusterConfig:
             InstanceCount: 1
@@ -112,9 +112,9 @@ training_pipeline:
           ContainerEntrypoint: ["python3", "/opt/ml/processing/src/evaluate_model.py"]
           ContainerArguments:
             - "--training-job-prefix"
-            - "bank-mktg-xgb"
+            - "stack-xgb"
             - "--model-prefix"
-            - "bank-mktg-model"
+            - "stack-model"
             - "--image-uri"
             - "257758044811.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-xgboost:1.7-1"
             - "--execution-role-arn"
@@ -122,17 +122,17 @@ training_pipeline:
             - "--region"
             - "{domain.region}"
             - "--test-data-path"
-            - "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/data/bank_mktg/features/test/"
+            - "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/data/bank_mktg/features/test/"
             - "--output-path"
-            - "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/models/evaluation/"
+            - "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/models/evaluation/"
             - "--tracking-server-arn"
             - "{proj.connection.mlflow-tracking.trackingServerArn}"
             - "--experiment-name"
-            - "bank-mktg-experiments"
+            - "stack-experiments"
         ProcessingInputs:
           - InputName: source
             S3Input:
-              S3Uri: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/src/"
+              S3Uri: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/src/"
               LocalPath: /opt/ml/processing/src
               S3DataType: S3Prefix
               S3InputMode: File
@@ -140,7 +140,7 @@ training_pipeline:
           Outputs:
             - OutputName: evaluation
               S3Output:
-                S3Uri: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/models/evaluation/"
+                S3Uri: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/models/evaluation/"
                 LocalPath: /opt/ml/processing/output
                 S3UploadMode: EndOfJob
         RoleArn: "{proj.iam_role_arn}"
@@ -161,6 +161,6 @@ training_pipeline:
       # failed) job. The train task's XCom carries the real S3ModelArtifacts
       # location of the job that actually ran.
       model_url: "{{ ti.xcom_pull(task_ids='train_model')['Training']['ModelArtifacts']['S3ModelArtifacts'] }}"
-      package_group_name: "bank-mktg-prediction-models"
+      package_group_name: "stack-prediction-models"
 
 # end of workflow

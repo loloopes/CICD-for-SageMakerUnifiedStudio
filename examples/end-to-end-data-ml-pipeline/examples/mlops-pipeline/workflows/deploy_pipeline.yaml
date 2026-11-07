@@ -26,7 +26,7 @@ deploy_pipeline:
       wait_for_completion: true
       print_log: true
       config:
-        ProcessingJobName: 'bank-mktg-deploy-{{ ts_nodash }}'
+        ProcessingJobName: 'stack-deploy-{{ ts_nodash }}'
         ProcessingResources:
           ClusterConfig:
             InstanceCount: 1
@@ -37,7 +37,7 @@ deploy_pipeline:
           ContainerEntrypoint: ["python3", "/opt/ml/processing/src/deploy_model.py"]
           ContainerArguments:
             - "--model-package-group"
-            - "bank-mktg-prediction-models"
+            - "stack-prediction-models"
             - "--endpoint-name"
             - "{env.ENDPOINT_NAME}"
             - "--image-uri"
@@ -53,7 +53,7 @@ deploy_pipeline:
             - "--tracking-server-arn"
             - "{proj.connection.mlflow-tracking.trackingServerArn}"
             - "--experiment-name"
-            - "bank-mktg-experiments"
+            - "stack-experiments"
             # Promotion overrides — passed by the GitHub workflow via env
             # substitution. "none" sentinel means "no override" (i.e. fall
             # back to latest-Approved / package's own ModelDataUrl).
@@ -66,7 +66,7 @@ deploy_pipeline:
         ProcessingInputs:
           - InputName: source
             S3Input:
-              S3Uri: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/src/"
+              S3Uri: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/src/"
               LocalPath: /opt/ml/processing/src
               S3DataType: S3Prefix
               S3InputMode: File
@@ -74,7 +74,7 @@ deploy_pipeline:
           Outputs:
             - OutputName: deployment
               S3Output:
-                S3Uri: "{proj.connection.default.s3_shared.s3Uri}bank-mktg/mlops_pipeline/deployments/"
+                S3Uri: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/deployments/"
                 LocalPath: /opt/ml/processing/output
                 S3UploadMode: EndOfJob
         RoleArn: "{proj.iam_role_arn}"
