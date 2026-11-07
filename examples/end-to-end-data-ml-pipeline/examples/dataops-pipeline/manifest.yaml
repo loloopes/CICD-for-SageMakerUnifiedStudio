@@ -46,6 +46,8 @@ stages:
       name: ${DEV_PROJECT_NAME:e2e-data-stack-ml-ops-dev}
       create: true
       profileName: All capabilities
+      owners:
+        - ${PROJECT_OWNER_ARN:arn:aws:iam:::user/lopes@stacktecnologias.com.br}
 
     environment_variables:
       ATHENA_DB_NAME: bank_mktg_dev

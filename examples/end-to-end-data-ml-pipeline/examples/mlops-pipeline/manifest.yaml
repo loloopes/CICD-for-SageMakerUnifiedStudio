@@ -60,6 +60,8 @@ stages:
       name: ${DEV_PROJECT_NAME:e2e-data-stack-ml-ops-dev}
       create: true
       profileName: All capabilities
+      owners:
+        - ${PROJECT_OWNER_ARN:arn:aws:iam:::user/lopes@stacktecnologias.com.br}
     environment_variables:
       ENDPOINT_NAME: stack-prediction-dev
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
@@ -103,6 +105,8 @@ stages:
       name: ${TEST_PROJECT_NAME:e2e-data-stack-ml-ops-test}
       create: true
       profileName: All capabilities
+      owners:
+        - ${PROJECT_OWNER_ARN:arn:aws:iam:::user/lopes@stacktecnologias.com.br}
     environment_variables:
       ENDPOINT_NAME: stack-prediction-test
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
@@ -140,6 +144,8 @@ stages:
       name: ${PROD_PROJECT_NAME:e2e-data-stack-ml-ops-prod}
       create: true
       profileName: All capabilities
+      owners:
+        - ${PROJECT_OWNER_ARN:arn:aws:iam:::user/lopes@stacktecnologias.com.br}
     environment_variables:
       ENDPOINT_NAME: stack-prediction-prod
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
