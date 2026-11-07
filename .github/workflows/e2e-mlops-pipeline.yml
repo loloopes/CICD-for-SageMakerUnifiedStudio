@@ -23,6 +23,11 @@ on:
         required: false
         default: true
         type: boolean
+      run_training:
+        description: "After deploy, run training_pipeline in dev (registers PendingManualApproval model)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   id-token: write
@@ -138,3 +143,12 @@ jobs:
       skip_tests: true
       # Ensures the MLflow tracking server exists (creates it only if missing).
       setup_mlflow: true
+
+  # Optional: kick off training after a successful deploy (workflow_dispatch only).
+  # Standalone retrain without redeploy: use e2e-mlops-train.yml.
+  train:
+    name: Run training_pipeline (dev)
+    needs: [deploy]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_training && needs.deploy.result == 'success' }}
+    uses: ./.github/workflows/e2e-mlops-train.yml
+    secrets: inherit

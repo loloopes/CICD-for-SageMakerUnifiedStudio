@@ -1,0 +1,85 @@
+name: E2E MLOps Train
+
+# Runs training_pipeline in the dev SMUS project (preprocess → train → evaluate →
+# register). Registers a new model package version as PendingManualApproval.
+# Approve that version in the SageMaker Model Registry to start e2e-mlops-promote.
+#
+# Use after E2E Deploy MLOps (DAGs must already be deployed), or enable
+# run_training on E2E Deploy MLOps Pipeline to chain deploy → train.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  MANIFEST_DIR: examples/end-to-end-data-ml-pipeline/examples/mlops-pipeline
+  WORKFLOW_NAME: training_pipeline
+  DEV_ENVIRONMENT: dev-aws-account
+  DEV_ROLE_SECRET: AWS_ROLE_ARN_DEV
+
+jobs:
+  resolve-config:
+    runs-on: ubuntu-latest
+    outputs:
+      dev_environment: ${{ steps.vars.outputs.dev_environment }}
+      dev_role_secret: ${{ steps.vars.outputs.dev_role_secret }}
+    steps:
+      - id: vars
+        run: |
+          echo "dev_environment=$DEV_ENVIRONMENT" >> "$GITHUB_OUTPUT"
+          echo "dev_role_secret=$DEV_ROLE_SECRET" >> "$GITHUB_OUTPUT"
+
+  train:
+    name: Run training_pipeline (dev)
+    needs: [resolve-config]
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: ${{ needs.resolve-config.outputs.dev_environment }}
+    env:
+      STAGE: dev
+      REGION: ${{ vars.DOMAIN_REGION || 'us-east-1' }}
+      DEV_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
+      TEST_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
+      PROD_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Authenticate via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets[needs.resolve-config.outputs.dev_role_secret] }}
+          aws-region: ${{ vars.DOMAIN_REGION || 'us-east-1' }}
+          role-session-name: smus-mlops-train-session
+
+      - name: Install CLI
+        run: pip install aws-smus-cicd-cli pyyaml boto3 -q
+
+      - name: Validate target (describe --connect)
+        working-directory: ${{ env.MANIFEST_DIR }}
+        run: aws-smus-cicd-cli describe --manifest manifest.yaml --targets "$STAGE" --connect
+
+      - name: Run training_pipeline DAG
+        working-directory: ${{ env.MANIFEST_DIR }}
+        run: |
+          aws-smus-cicd-cli run --manifest manifest.yaml --targets "$STAGE" --workflow "$WORKFLOW_NAME"
+          aws-smus-cicd-cli monitor --manifest manifest.yaml --targets "$STAGE" --live
+
+      - name: Summary
+        run: |
+          {
+            echo "### Training pipeline finished"
+            echo ""
+            echo "A new model version should be in \`bank-mktg-prediction-models\` as \`PendingManualApproval\`."
+            echo ""
+            echo "Next: approve that version in the SageMaker Model Registry to trigger **E2E MLOps Promotion**."
+            echo ""
+            echo "MLflow: experiment \`bank-mktg-experiments\` → look for a new \`bank-mktg-xgb-…\` / \`evaluate-…\` run."
+          } >> "$GITHUB_STEP_SUMMARY"
