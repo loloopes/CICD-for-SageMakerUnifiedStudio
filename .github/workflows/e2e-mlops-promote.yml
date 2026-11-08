@@ -60,6 +60,9 @@ env:
   PROJECT_OWNER_ARN: ${{ secrets.PROJECT_OWNER_ARN || 'arn:aws:iam:::user/lopes@stacktecnologias.com.br' }}
   MLFLOW_TRACKING_SERVER_NAME: ${{ vars.MLFLOW_TRACKING_SERVER_NAME || 'smus-integration-mlflow-us-east-1' }}
   MLFLOW_TRACKING_SERVER_ARN: ${{ vars.MLFLOW_TRACKING_SERVER_ARN }}
+  # Must match the domain `purpose` tag (your repo var is smus-cicd-stack-testing).
+  # Without this, stage-artifact falls back to smus-cicd-testing and finds no domain.
+  DOMAIN_TAG_PURPOSE: ${{ vars.DOMAIN_TAG_PURPOSE || 'smus-cicd-testing' }}
 
 jobs:
   # Exposes per-stage environment names as job outputs, since the job-level
