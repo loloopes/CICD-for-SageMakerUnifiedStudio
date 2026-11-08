@@ -12,7 +12,7 @@
 # =============================================================================
 
 
-applicationName: demo
+applicationName: wokflow
 
 content:
   storage:
