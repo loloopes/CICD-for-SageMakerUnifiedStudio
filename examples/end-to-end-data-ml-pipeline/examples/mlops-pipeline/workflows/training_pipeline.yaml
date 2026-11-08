@@ -161,6 +161,6 @@ training_pipeline:
       # failed) job. The train task's XCom carries the real S3ModelArtifacts
       # location of the job that actually ran.
       model_url: "{{ ti.xcom_pull(task_ids='train_model')['Training']['ModelArtifacts']['S3ModelArtifacts'] }}"
-      package_group_name: "stack-prediction-models"
+      package_group_name: "{env.MODEL_PACKAGE_GROUP}"
 
 # end of workflow

@@ -132,6 +132,7 @@ jobs:
           STS_ACCOUNT_ID: ${{ steps.aws-account.outputs.account-id }}
           AWS_ACCOUNT_ID: ${{ steps.aws-account.outputs.account-id }}
           MODEL_NAME: ${{ vars.MODEL_NAME || 'latest' }}
+          MODEL_PACKAGE_GROUP: ${{ vars.MODEL_PACKAGE_GROUP || 'stack-prediction-models' }}
         run: |
           aws-smus-cicd-cli deploy \
             --manifest "${{ inputs.manifest_path }}" \

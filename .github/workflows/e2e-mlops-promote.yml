@@ -40,7 +40,7 @@ permissions:
 env:
   WORKFLOW_NAME: deploy_pipeline
   MANIFEST_DIR: examples/end-to-end-data-ml-pipeline/examples/mlops-pipeline
-  MODEL_PACKAGE_GROUP: stack-prediction-models
+  MODEL_PACKAGE_GROUP: ${{ vars.MODEL_PACKAGE_GROUP || 'stack-prediction-models' }}
   MLOPS_HELPER: examples/end-to-end-data-ml-pipeline/scripts/mlops_helper.py
   # GitHub Environment + OIDC secret name per stage. Workflow-level `vars` cannot
   # see environment variables, so DOMAIN_REGION is resolved on each job below

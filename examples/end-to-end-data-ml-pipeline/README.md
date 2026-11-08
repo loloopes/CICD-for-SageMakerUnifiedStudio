@@ -340,6 +340,10 @@ Some values are derived at runtime and do not need to be set:
 | `ATHENA_DB_NAME` | repo/environment | Glue/Athena database for DataOps output (optional; defaults to `stack_bank_mktg_dev`) |
 | `MLFLOW_TRACKING_SERVER_NAME` | repo/environment | MLflow tracking server name (optional; manifest has a default) |
 | `DOMAIN_TAG_PURPOSE` | repo/environment | Optional override for the domain `purpose` tag (defaults to `smus-cicd-testing`) |
+| `MODEL_PACKAGE_GROUP` | repo/environment | SageMaker model package group name (optional; default `stack-prediction-models`). Must match across train, promote, and the EventBridge rule. |
+| `DEPLOY_TRIGGER_FUNCTION_NAME` | repo/environment | Lambda name for the approval → promote trigger (optional; default `stack-airflow-deploy-trigger`) |
+| `DEPLOY_TRIGGER_RULE_NAME` | repo/environment | EventBridge rule name for model approvals (optional; default `stack-model-approved`) |
+| `DEPLOY_TRIGGER_ROLE_NAME` | repo/environment | IAM role for the deploy-trigger Lambda (optional; default `stack-airflow-deploy-trigger-role`) |
 
 ### Note: Moving to a multi-account deployment
 

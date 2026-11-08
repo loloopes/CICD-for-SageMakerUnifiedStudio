@@ -12,6 +12,13 @@
 #   ./scripts/setup-mlops-infra.sh dev 973414239152 us-east-1 stack-dev
 #   ./scripts/setup-mlops-infra.sh prod 987654321098 us-west-2 stack-prod
 #
+# Optional env vars (override resource names; set as GitHub Actions variables
+# to avoid collisions when multiple projects share an account):
+#   DEPLOY_TRIGGER_FUNCTION_NAME  (default: stack-airflow-deploy-trigger)
+#   DEPLOY_TRIGGER_RULE_NAME      (default: stack-model-approved)
+#   DEPLOY_TRIGGER_ROLE_NAME      (default: stack-airflow-deploy-trigger-role)
+#   MODEL_PACKAGE_GROUP           (default: stack-prediction-models)
+#
 # What it creates:
 #   1. Deploy Trigger (Lambda function, EventBridge rule, IAM role)
 #
@@ -53,10 +60,10 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  Event-Based Deploy Trigger"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-FUNCTION_NAME="stack-airflow-deploy-trigger"
-RULE_NAME="stack-model-approved"
-LAMBDA_ROLE_NAME="stack-airflow-deploy-trigger-role"
-MODEL_PACKAGE_GROUP="stack-prediction-models"
+FUNCTION_NAME="${DEPLOY_TRIGGER_FUNCTION_NAME:-stack-airflow-deploy-trigger}"
+RULE_NAME="${DEPLOY_TRIGGER_RULE_NAME:-stack-model-approved}"
+LAMBDA_ROLE_NAME="${DEPLOY_TRIGGER_ROLE_NAME:-stack-airflow-deploy-trigger-role}"
+MODEL_PACKAGE_GROUP="${MODEL_PACKAGE_GROUP:-stack-prediction-models}"
 
 # Step 1.1: Create Lambda execution role
 echo ""
@@ -344,6 +351,8 @@ echo "║                                                          ║"
 echo "║  Deploy Trigger                                          ║"
 echo "║    Rule:      $RULE_NAME"
 echo "║    Lambda:    $FUNCTION_NAME"
+echo "║    Role:      $LAMBDA_ROLE_NAME"
+echo "║    Model grp: $MODEL_PACKAGE_GROUP"
 echo "║    GitHub:    $GITHUB_REPO"
 echo "║                                                          ║"
 echo "║  Flow:                                                   ║"

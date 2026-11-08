@@ -2,8 +2,10 @@
 # =============================================================================
 # Setup GitHub Actions OIDC Role for smus-cli deployments
 # =============================================================================
-# Creates the OIDC provider and a minimal IAM role that can only assume
-# the specified deployment role. All service permissions live on the deployment role.
+# Creates the OIDC provider and an IAM role that can:
+#   1. Assume the specified deployment / project role (smus-cli deploys)
+#   2. Provision the MLOps deploy trigger (Lambda + EventBridge + its IAM role)
+#      used by setup-mlops-infra.sh in the e2e-mlops-pipeline setup-infra job
 #
 # Usage:
 #   ./scripts/setup-github-oidc.sh <env> <deployment-role-name> <account-id> <github-repo>
@@ -116,6 +118,61 @@ aws iam put-role-policy \
   --role-name "$ROLE_NAME" \
   --policy-name "AssumeProjectRole" \
   --policy-document "$ASSUME_POLICY"
+echo "  Applied."
+
+# ── Step 3b: Inline policy for setup-mlops-infra.sh (EventBridge + Lambda) ───
+# The setup-infra CI job assumes this OIDC role directly (no secondary hop) and
+# runs setup-mlops-infra.sh, which creates the deploy-trigger Lambda, its
+# execution role, and the EventBridge rule. Scope is limited to the stack-*
+# resources that script provisions.
+echo "Step 3b: MLOps infra setup policy..."
+MLOPS_INFRA_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LambdaDeployTrigger",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:GetFunction",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:AddPermission",
+        "lambda:RemovePermission"
+      ],
+      "Resource": "arn:aws:lambda:*:${ACCOUNT_ID}:function:stack-airflow-deploy-trigger"
+    },
+    {
+      "Sid": "LambdaExecutionRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:CreateRole",
+        "iam:PutRolePolicy",
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/stack-airflow-deploy-trigger-role"
+    },
+    {
+      "Sid": "EventBridgeDeployTrigger",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:PutTargets",
+        "events:DescribeRule"
+      ],
+      "Resource": "arn:aws:events:*:${ACCOUNT_ID}:rule/stack-model-approved"
+    }
+  ]
+}
+EOF
+)
+
+aws iam put-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "MlopsInfraSetup" \
+  --policy-document "$MLOPS_INFRA_POLICY"
 echo "  Applied."
 
 # ── Step 4: Project role trust policy ────────────────────────────────────────

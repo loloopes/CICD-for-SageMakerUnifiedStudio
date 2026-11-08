@@ -66,6 +66,7 @@ stages:
       ENDPOINT_NAME: stack-prediction-dev
       ATHENA_DB_NAME: ${ATHENA_DB_NAME:stack_bank_mktg_dev}
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
+      MODEL_PACKAGE_GROUP: "${MODEL_PACKAGE_GROUP:stack-prediction-models}"
       MODEL_PACKAGE_ARN: "${MODEL_PACKAGE_ARN:none}"
       MODEL_DATA_URL_OVERRIDE: "${MODEL_DATA_URL_OVERRIDE:none}"
       GIT_COMMIT: "${GIT_COMMIT:unset}"
@@ -111,6 +112,7 @@ stages:
     environment_variables:
       ENDPOINT_NAME: stack-prediction-test
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
+      MODEL_PACKAGE_GROUP: "${MODEL_PACKAGE_GROUP:stack-prediction-models}"
       MODEL_PACKAGE_ARN: "${MODEL_PACKAGE_ARN:none}"
       MODEL_DATA_URL_OVERRIDE: "${MODEL_DATA_URL_OVERRIDE:none}"
       GIT_COMMIT: "${GIT_COMMIT:unset}"
@@ -150,6 +152,7 @@ stages:
     environment_variables:
       ENDPOINT_NAME: stack-prediction-prod
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
+      MODEL_PACKAGE_GROUP: "${MODEL_PACKAGE_GROUP:stack-prediction-models}"
       MODEL_PACKAGE_ARN: "${MODEL_PACKAGE_ARN:none}"
       MODEL_DATA_URL_OVERRIDE: "${MODEL_DATA_URL_OVERRIDE:none}"
       GIT_COMMIT: "${GIT_COMMIT:unset}"

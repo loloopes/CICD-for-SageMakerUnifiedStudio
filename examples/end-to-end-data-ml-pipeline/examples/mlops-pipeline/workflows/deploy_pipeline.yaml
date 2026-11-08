@@ -37,7 +37,7 @@ deploy_pipeline:
           ContainerEntrypoint: ["python3", "/opt/ml/processing/src/deploy_model.py"]
           ContainerArguments:
             - "--model-package-group"
-            - "stack-prediction-models"
+            - "{env.MODEL_PACKAGE_GROUP}"
             - "--endpoint-name"
             - "{env.ENDPOINT_NAME}"
             - "--image-uri"

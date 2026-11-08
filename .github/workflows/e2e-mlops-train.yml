@@ -51,6 +51,7 @@ jobs:
       DOMAIN_TAG_PURPOSE: ${{ vars.DOMAIN_TAG_PURPOSE }}
       PROJECT_OWNER_ARN: ${{ secrets.PROJECT_OWNER_ARN || 'arn:aws:iam:::user/lopes@stacktecnologias.com.br' }}
       MLFLOW_TRACKING_SERVER_NAME: ${{ vars.MLFLOW_TRACKING_SERVER_NAME }}
+      MODEL_PACKAGE_GROUP: ${{ vars.MODEL_PACKAGE_GROUP || 'stack-prediction-models' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -83,7 +84,7 @@ jobs:
           {
             echo "### Training pipeline finished"
             echo ""
-            echo "A new model version should be in \`stack-prediction-models\` as \`PendingManualApproval\`."
+            echo "A new model version should be in \`$MODEL_PACKAGE_GROUP\` as \`PendingManualApproval\`."
             echo ""
             echo "Next: approve that version in the SageMaker Model Registry to trigger **E2E MLOps Promotion**."
             echo ""
