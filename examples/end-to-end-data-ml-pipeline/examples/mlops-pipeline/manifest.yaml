@@ -64,6 +64,7 @@ stages:
         - ${PROJECT_OWNER_ARN:arn:aws:iam:::user/lopes@stacktecnologias.com.br}
     environment_variables:
       ENDPOINT_NAME: stack-prediction-dev
+      ATHENA_DB_NAME: ${ATHENA_DB_NAME:stack_bank_mktg_dev}
       MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-1}"
       MODEL_PACKAGE_ARN: "${MODEL_PACKAGE_ARN:none}"
       MODEL_DATA_URL_OVERRIDE: "${MODEL_DATA_URL_OVERRIDE:none}"

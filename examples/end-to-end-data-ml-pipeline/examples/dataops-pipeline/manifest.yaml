@@ -50,7 +50,7 @@ stages:
         - ${PROJECT_OWNER_ARN:arn:aws:iam:::user/lopes@stacktecnologias.com.br}
 
     environment_variables:
-      ATHENA_DB_NAME: bank_mktg_dev
+      ATHENA_DB_NAME: ${ATHENA_DB_NAME:stack_bank_mktg_dev}
     bootstrap:
       actions:
         - type: datazone.create_environment

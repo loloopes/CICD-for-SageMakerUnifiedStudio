@@ -337,6 +337,7 @@ Some values are derived at runtime and do not need to be set:
 | -------- | ----- | ------- |
 | `DOMAIN_REGION` | environment (`dev-aws-account`) | Region for all stages (feeds `*_DOMAIN_REGION`) |
 | `DEV_PROJECT_NAME` / `TEST_PROJECT_NAME` / `PROD_PROJECT_NAME` | repo | SMUS project per stage (optional; manifest and workflows default to `e2e-data-stack-ml-ops-{dev,test,prod}`) |
+| `ATHENA_DB_NAME` | repo/environment | Glue/Athena database for DataOps output (optional; defaults to `stack_bank_mktg_dev`) |
 | `MLFLOW_TRACKING_SERVER_NAME` | repo/environment | MLflow tracking server name (optional; manifest has a default) |
 | `DOMAIN_TAG_PURPOSE` | repo/environment | Optional override for the domain `purpose` tag (defaults to `smus-cicd-testing`) |
 

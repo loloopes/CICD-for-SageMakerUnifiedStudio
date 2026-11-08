@@ -29,7 +29,7 @@ training_pipeline:
       script_args:
         "--INPUT_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/transformed/"
         "--OUTPUT_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/data/bank_mktg/features/"
-        "--CATALOG_DB": "bank_mktg_dev"
+        "--CATALOG_DB": "{env.ATHENA_DB_NAME}"
         "--TABLE_PREFIX": "features"
         "--TRAIN_RATIO": "0.70"
         "--VAL_RATIO": "0.15"

@@ -13,7 +13,7 @@ ingest_bank_data (Glue)
           → refresh_athena_table (Athena)
 ```
 
-**Output:** `bank_mktg_dev.campaign_results` table in the Glue Catalog, ready for ML training.
+**Output:** `{ATHENA_DB_NAME}.campaign_results` table in the Glue Catalog (default `stack_bank_mktg_dev`), ready for ML training.
 
 ## Prerequisites
 

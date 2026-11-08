@@ -80,7 +80,7 @@ data_pipeline:
       database: default
       # Project Tooling workgroup (tagged AmazonDataZoneProject); primary is untagged and denied
       workgroup: "{proj.connection.project.athena.workgroupName}"
-      query: CREATE DATABASE IF NOT EXISTS bank_mktg_dev
+      query: CREATE DATABASE IF NOT EXISTS {env.ATHENA_DB_NAME}
       output_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/athena_results/"
       dependencies:
         - data_quality_checks
@@ -88,7 +88,7 @@ data_pipeline:
     create_athena_table:
       operator: airflow.providers.amazon.aws.operators.athena.AthenaOperator
       aws_conn_id: aws_default
-      database: "bank_mktg_dev"
+      database: "{env.ATHENA_DB_NAME}"
       workgroup: "{proj.connection.project.athena.workgroupName}"
       query: |
         CREATE EXTERNAL TABLE IF NOT EXISTS campaign_results (
@@ -125,7 +125,7 @@ data_pipeline:
     refresh_athena_table:
       operator: airflow.providers.amazon.aws.operators.athena.AthenaOperator
       aws_conn_id: aws_default
-      database: "bank_mktg_dev"
+      database: "{env.ATHENA_DB_NAME}"
       workgroup: "{proj.connection.project.athena.workgroupName}"
       query: MSCK REPAIR TABLE campaign_results
       output_location: "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/athena_results/"
