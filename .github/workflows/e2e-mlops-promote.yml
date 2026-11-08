@@ -4,9 +4,10 @@ name: E2E MLOps Promotion (dev -> test -> prod)
 # the deploy_pipeline workflow in each stage's project with manual approval
 # gates before test and prod. Approval is via a GitHub issue; any user with
 # write/triage access to the repo (who can manage/close issues) may approve.
-# dev and test run in test-aws-account (OIDC secret AWS_ROLE_ARN_TEST). prod
-# runs in prod-aws-account (AWS_ROLE_ARN_PROD), which is the environment that
-# has required reviewers and pauses for the Review deployments prompt.
+# Per-stage GitHub Environments + OIDC secrets (multi-account ready):
+#   dev  -> dev-aws-account  / AWS_ROLE_ARN_DEV
+#   test -> test-aws-account / AWS_ROLE_ARN_TEST
+#   prod -> prod-aws-account  / AWS_ROLE_ARN_PROD
 
 on:
   workflow_dispatch:
@@ -45,10 +46,10 @@ env:
   # GitHub Environment + OIDC secret name per stage. Workflow-level `vars` cannot
   # see environment variables, so DOMAIN_REGION is resolved on each job below
   # after `environment:` is selected (otherwise it falls back to us-east-1).
-  DEV_ENVIRONMENT: test-aws-account
+  DEV_ENVIRONMENT: dev-aws-account
   TEST_ENVIRONMENT: test-aws-account
   PROD_ENVIRONMENT: prod-aws-account
-  DEV_ROLE_SECRET: AWS_ROLE_ARN_TEST
+  DEV_ROLE_SECRET: AWS_ROLE_ARN_DEV
   TEST_ROLE_SECRET: AWS_ROLE_ARN_TEST
   PROD_ROLE_SECRET: AWS_ROLE_ARN_PROD
   # SMUS project names consumed by the CLI (manifest ${..} substitution
