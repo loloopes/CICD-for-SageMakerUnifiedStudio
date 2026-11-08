@@ -173,29 +173,46 @@ def extract_model_data_url(model_package):
 # =============================================================================
 
 
-def create_sagemaker_model(sm, model_name, model_package_arn, image_uri, model_data_url, execution_role_arn):
-    """Create a SageMaker Model, trying model package first then falling back to image + data."""
+def create_sagemaker_model(
+    sm,
+    model_name,
+    model_package_arn,
+    image_uri,
+    model_data_url,
+    execution_role_arn,
+    prefer_data_url=False,
+):
+    """Create a SageMaker Model.
+
+    By default tries the model package first, then falls back to image + data URL.
+    When ``prefer_data_url`` is True (promote staged the artifact into the target
+    project's bucket), skip the package path — ModelPackageName always points at
+    the *source* ModelDataUrl, which the target stage role often cannot read.
+    """
     logger.info(f"Creating SageMaker model: {model_name}")
 
-    try:
-        sm.create_model(
-            ModelName=model_name,
-            Containers=[{"ModelPackageName": model_package_arn}],
-            ExecutionRoleArn=execution_role_arn,
-        )
-        logger.info(f"  Created from model package")
-    except sm.exceptions.ClientError as e:
-        logger.warning(f"  Model package approach failed: {e}")
-        logger.info(f"  Falling back to image + model data URL")
-        sm.create_model(
-            ModelName=model_name,
-            PrimaryContainer={
-                "Image": image_uri,
-                "ModelDataUrl": model_data_url,
-            },
-            ExecutionRoleArn=execution_role_arn,
-        )
-        logger.info(f"  Created from image + data URL")
+    if not prefer_data_url:
+        try:
+            sm.create_model(
+                ModelName=model_name,
+                Containers=[{"ModelPackageName": model_package_arn}],
+                ExecutionRoleArn=execution_role_arn,
+            )
+            logger.info(f"  Created from model package")
+            return
+        except sm.exceptions.ClientError as e:
+            logger.warning(f"  Model package approach failed: {e}")
+            logger.info(f"  Falling back to image + model data URL")
+
+    sm.create_model(
+        ModelName=model_name,
+        PrimaryContainer={
+            "Image": image_uri,
+            "ModelDataUrl": model_data_url,
+        },
+        ExecutionRoleArn=execution_role_arn,
+    )
+    logger.info(f"  Created from image + data URL")
 
 
 def deploy_endpoint(sm, endpoint_name, model_name, instance_type, instance_count):
@@ -217,11 +234,21 @@ def deploy_endpoint(sm, endpoint_name, model_name, instance_type, instance_count
         ],
     )
 
-    # Check if endpoint exists
+    # Check if endpoint exists (Failed endpoints must be deleted before recreate)
     endpoint_exists = False
     try:
-        sm.describe_endpoint(EndpointName=endpoint_name)
-        endpoint_exists = True
+        existing = sm.describe_endpoint(EndpointName=endpoint_name)
+        status = existing.get("EndpointStatus", "")
+        if status == "Failed":
+            logger.warning(
+                f"Endpoint {endpoint_name} is Failed "
+                f"({existing.get('FailureReason', 'unknown')}); deleting before recreate"
+            )
+            sm.delete_endpoint(EndpointName=endpoint_name)
+            waiter = sm.get_waiter("endpoint_deleted")
+            waiter.wait(EndpointName=endpoint_name, WaiterConfig={"Delay": 15, "MaxAttempts": 40})
+        else:
+            endpoint_exists = True
     except sm.exceptions.ClientError as e:
         if "Could not find endpoint" not in str(e):
             raise
@@ -368,7 +395,17 @@ def main():
     # Step 2: Create SageMaker Model
     logger.info("[2/5] Creating SageMaker model")
     model_name = f"{args.endpoint_name}-{int(time.time())}"
-    create_sagemaker_model(sm, model_name, model_package_arn, args.image_uri, model_data_url, args.execution_role_arn)
+    # Staged overrides must use image + ModelDataUrl so the endpoint downloads
+    # from the target project bucket the stage role can actually read.
+    create_sagemaker_model(
+        sm,
+        model_name,
+        model_package_arn,
+        args.image_uri,
+        model_data_url,
+        args.execution_role_arn,
+        prefer_data_url=bool(data_url_override),
+    )
 
     # Step 3: Deploy endpoint
     logger.info("[3/5] Deploying endpoint")
