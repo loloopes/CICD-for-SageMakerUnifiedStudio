@@ -329,7 +329,6 @@ jobs:
           AWS_ACCOUNT_ID: ${{ steps.aws-account-test.outputs.account-id }}
           MODEL_NAME: ${{ vars.MODEL_NAME || 'latest' }}
         run: |
-          echo "🔍 MODEL_NAME: $MODEL_NAME"
           echo "🔍 Running dry-run validation before deploying to test..."
           BUNDLE_FILE=$(ls ${{ runner.temp }}/smus-bundles-${{ github.run_id }}/*.zip | head -1)
           
@@ -353,7 +352,7 @@ jobs:
         run: |
           echo "🔍 DOMAIN_REGION: $DOMAIN_REGION"
           echo "🔍 TEST_DOMAIN_REGION: $TEST_DOMAIN_REGION"
-          echo "🔍 MODEL_NAME: $MODEL_NAME"
+          
           BUNDLE_FILE=$(ls ${{ runner.temp }}/smus-bundles-${{ github.run_id }}/*.zip | head -1)
           echo "🔍 Using bundle: $BUNDLE_FILE"
           
@@ -571,7 +570,7 @@ jobs:
         run: |
           echo "🔍 DOMAIN_REGION: $DOMAIN_REGION"
           echo "🔍 PROD_DOMAIN_REGION: $PROD_DOMAIN_REGION"
-          echo "🔍 MODEL_NAME: $MODEL_NAME"
+          
           BUNDLE_FILE=$(ls ${{ runner.temp }}/smus-bundles-${{ github.run_id }}/*.zip | head -1)
           echo "🔍 Using bundle: $BUNDLE_FILE"
           

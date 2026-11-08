@@ -1241,28 +1241,60 @@ def resolve_connection_details(connection_name, target_config, region, domain_na
 
 
 def get_user_id_by_username(username, domain_id, region):
-    """Get user identifier by username or IAM role ARN using DataZone and Identity Center APIs."""
+    """Get user identifier by username or IAM user/role ARN using DataZone and Identity Center APIs."""
     try:
         datazone_client = _get_datazone_client(region)
 
-        # Check if username is an IAM role ARN
-        if username.startswith("arn:aws:iam::") and ":role/" in username:
-            # Search for IAM role in DataZone user profiles
+        # IAM user or role ARN → search DataZone IAM user profiles by ARN
+        if username.startswith("arn:aws:iam::") and (
+            ":user/" in username or ":role/" in username
+        ):
             try:
-                response = datazone_client.search_user_profiles(
-                    domainIdentifier=domain_id, userType="DATAZONE_IAM_USER"
-                )
+                # Prefer a targeted search (name segment after user/ or role/)
+                search_text = username.rsplit("/", 1)[-1]
+                next_token = None
+                while True:
+                    params = {
+                        "domainIdentifier": domain_id,
+                        "userType": "DATAZONE_IAM_USER",
+                        "searchText": search_text,
+                    }
+                    if next_token:
+                        params["nextToken"] = next_token
+                    response = datazone_client.search_user_profiles(**params)
 
-                for user_profile in response.get("items", []):
-                    iam_details = user_profile.get("details", {}).get("iam", {})
-                    if iam_details.get("arn") == username:
-                        return user_profile.get("id")
+                    for user_profile in response.get("items", []):
+                        iam_details = user_profile.get("details", {}).get("iam", {})
+                        if iam_details.get("arn") == username:
+                            return user_profile.get("id")
 
-                print(f"IAM role ARN '{username}' not found in DataZone user profiles")
+                    next_token = response.get("nextToken")
+                    if not next_token:
+                        break
+
+                # IAM user profiles are often created on first use; create if missing
+                if ":user/" in username:
+                    try:
+                        created = datazone_client.create_user_profile(
+                            domainIdentifier=domain_id,
+                            userIdentifier=username,
+                            userType="IAM_USER",
+                        )
+                        profile_id = created.get("id")
+                        if profile_id:
+                            print(f"✅ Created IAM user profile for '{username}'")
+                            return profile_id
+                    except Exception as create_error:
+                        if "already exists" not in str(create_error).lower():
+                            print(
+                                f"⚠️ Could not create IAM user profile for '{username}': {create_error}"
+                            )
+
+                print(f"IAM ARN '{username}' not found in DataZone user profiles")
                 return None
 
             except Exception as e:
-                print(f"Error searching for IAM role '{username}': {str(e)}")
+                print(f"Error searching for IAM ARN '{username}': {str(e)}")
                 return None
 
         # Handle regular username lookup via Identity Center
@@ -1424,7 +1456,10 @@ def manage_project_memberships(
         for member in response.get("members", []):
             member_details = member.get("memberDetails", {})
             if "user" in member_details:
-                user_id = member_details["user"].get("userIdentifier")
+                # API returns userId; older paths used userIdentifier
+                user_id = member_details["user"].get("userId") or member_details[
+                    "user"
+                ].get("userIdentifier")
                 if user_id:
                     existing_members[user_id] = member.get("designation")
             elif "group" in member_details:
@@ -1434,20 +1469,19 @@ def manage_project_memberships(
 
         typer.echo(f"🔍 Found {len(existing_members)} existing members")
 
+        def _resolve_member(principal: str):
+            """Resolve IAM role ARN, IAM user ARN, or username to a membership spec."""
+            if principal.startswith("arn:aws:iam::") and ":role/" in principal:
+                member_id = get_group_id_for_role_arn(principal, domain_id, region)
+                return member_id, {"groupIdentifier": member_id}, "role"
+            # IAM user ARN or IDC username
+            member_id = get_user_id_by_username(principal, domain_id, region)
+            return member_id, {"userIdentifier": member_id}, "user"
+
         # Add owners
         if owners:
             for owner in owners:
-                # Determine if it's an IAM role ARN or username
-                if owner.startswith("arn:aws:iam::"):
-                    # It's an IAM role - get group ID
-                    member_id = get_group_id_for_role_arn(owner, domain_id, region)
-                    member_spec = {"groupIdentifier": member_id}
-                    member_type = "role"
-                else:
-                    # It's a username - resolve to user ID
-                    member_id = get_user_id_by_username(owner, domain_id, region)
-                    member_spec = {"userIdentifier": member_id}
-                    member_type = "user"
+                member_id, member_spec, member_type = _resolve_member(owner)
 
                 if not member_id:
                     typer.echo(f"⚠️ Could not resolve owner: {owner}")
@@ -1477,17 +1511,7 @@ def manage_project_memberships(
         # Add contributors
         if contributors:
             for contributor in contributors:
-                # Determine if it's an IAM role ARN or username
-                if contributor.startswith("arn:aws:iam::"):
-                    member_id = get_group_id_for_role_arn(
-                        contributor, domain_id, region
-                    )
-                    member_spec = {"groupIdentifier": member_id}
-                    member_type = "role"
-                else:
-                    member_id = get_user_id_by_username(contributor, domain_id, region)
-                    member_spec = {"userIdentifier": member_id}
-                    member_type = "user"
+                member_id, member_spec, member_type = _resolve_member(contributor)
 
                 if not member_id:
                     typer.echo(f"⚠️ Could not resolve contributor: {contributor}")
