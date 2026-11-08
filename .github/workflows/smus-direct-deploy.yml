@@ -41,6 +41,9 @@ on:
       AWS_ROLE_ARN:
         description: 'OIDC role ARN to assume'
         required: true
+      PROJECT_OWNER_ARN:
+        description: 'IAM principal ARN added as SMUS project owner'
+        required: false
 
 permissions:
   id-token: write
@@ -121,7 +124,7 @@ jobs:
           TEST_PROJECT_NAME: ${{ vars.TEST_PROJECT_NAME }}
           PROD_PROJECT_NAME: ${{ vars.PROD_PROJECT_NAME }}
           DOMAIN_TAG_PURPOSE: ${{ vars.DOMAIN_TAG_PURPOSE }}
-          PROJECT_OWNER_ARN: ${{ vars.PROJECT_OWNER_ARN || 'arn:aws:iam:::user/lopes@stacktecnologias.com.br' }}
+          PROJECT_OWNER_ARN: ${{ secrets.PROJECT_OWNER_ARN || 'arn:aws:iam:::user/lopes@stacktecnologias.com.br' }}
           MLFLOW_TRACKING_SERVER_NAME: ${{ vars.MLFLOW_TRACKING_SERVER_NAME || (inputs.setup_mlflow && format('smus-integration-mlflow-{0}', vars.DOMAIN_REGION) || '') }}
           MLFLOW_ARTIFACT_LOCATION: s3://amazon-sagemaker-${{ steps.aws-account.outputs.account-id }}-${{ vars.DOMAIN_REGION }}-${{ vars.PROJECT_ID }}/shared/ml/mlflow-artifacts
           STS_REGION: ${{ vars.DOMAIN_REGION }}
@@ -222,7 +225,7 @@ jobs:
           TEST_PROJECT_NAME: ${{ vars.TEST_PROJECT_NAME }}
           PROD_PROJECT_NAME: ${{ vars.PROD_PROJECT_NAME }}
           DOMAIN_TAG_PURPOSE: ${{ vars.DOMAIN_TAG_PURPOSE }}
-          PROJECT_OWNER_ARN: ${{ vars.PROJECT_OWNER_ARN || 'arn:aws:iam:::user/lopes@stacktecnologias.com.br' }}
+          PROJECT_OWNER_ARN: ${{ secrets.PROJECT_OWNER_ARN || 'arn:aws:iam:::user/lopes@stacktecnologias.com.br' }}
           MLFLOW_TRACKING_SERVER_NAME: ${{ vars.MLFLOW_TRACKING_SERVER_NAME || (inputs.setup_mlflow && format('smus-integration-mlflow-{0}', vars.DOMAIN_REGION) || '') }}
           MLFLOW_ARTIFACT_LOCATION: s3://amazon-sagemaker-${{ steps.aws-account-test.outputs.account-id }}-${{ vars.DOMAIN_REGION }}-${{ vars.PROJECT_ID }}/shared/ml/mlflow-artifacts
           STS_REGION: ${{ vars.DOMAIN_REGION }}

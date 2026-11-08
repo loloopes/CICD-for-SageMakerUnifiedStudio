@@ -136,6 +136,7 @@ jobs:
     uses: ./.github/workflows/smus-direct-deploy.yml
     secrets:
       AWS_ROLE_ARN: ${{ secrets[matrix.role_secret] }}
+      PROJECT_OWNER_ARN: ${{ secrets.PROJECT_OWNER_ARN }}
     with:
       manifest_path: 'examples/end-to-end-data-ml-pipeline/examples/mlops-pipeline/manifest.yaml'
       target: ${{ matrix.stage }}

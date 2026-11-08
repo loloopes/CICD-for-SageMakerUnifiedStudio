@@ -39,6 +39,7 @@ jobs:
     uses: ./.github/workflows/smus-direct-deploy.yml
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN_DEV }}
+      PROJECT_OWNER_ARN: ${{ secrets.PROJECT_OWNER_ARN }}
     with:
       manifest_path: 'examples/end-to-end-data-ml-pipeline/examples/dataops-pipeline/manifest.yaml'
       target: 'dev'

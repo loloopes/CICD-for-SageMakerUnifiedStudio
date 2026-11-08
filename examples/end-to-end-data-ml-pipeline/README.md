@@ -324,11 +324,12 @@ Some values are derived at runtime and do not need to be set:
 - **Domain** — resolved by region + the `purpose` tag on the manifest's domain block (default `smus-cicd-testing`), so no domain *name* variable is needed.
 - **Project owner** — the deploying principal is already the project owner, so the manifests no longer hardcode an owner role.
 
-**Secrets** (stored in the `dev-aws-account` environment):
+**Secrets:**
 
-| Secret | Purpose |
-| ------ | ------- |
-| `AWS_ROLE_ARN_DEV` | Single OIDC role assumed by every job (all stages); mapped into the reusable's generic `AWS_ROLE_ARN` |
+| Secret | Scope | Purpose |
+| ------ | ----- | ------- |
+| `AWS_ROLE_ARN_DEV` | environment (`dev-aws-account`) or repo | Single OIDC role assumed by every job (all stages); mapped into the reusable's generic `AWS_ROLE_ARN` |
+| `PROJECT_OWNER_ARN` | repo | IAM principal ARN added as SMUS project owner on deploy |
 
 **Variables:**
 

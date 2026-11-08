@@ -56,7 +56,7 @@ env:
   DEV_PROJECT_NAME: ${{ vars.DEV_PROJECT_NAME || 'e2e-data-stack-ml-ops-dev' }}
   TEST_PROJECT_NAME: ${{ vars.TEST_PROJECT_NAME || 'e2e-data-stack-ml-ops-test' }}
   PROD_PROJECT_NAME: ${{ vars.PROD_PROJECT_NAME || 'e2e-data-stack-ml-ops-prod' }}
-  PROJECT_OWNER_ARN: ${{ vars.PROJECT_OWNER_ARN || 'arn:aws:iam:::user/lopes@stacktecnologias.com.br' }}
+  PROJECT_OWNER_ARN: ${{ secrets.PROJECT_OWNER_ARN || 'arn:aws:iam:::user/lopes@stacktecnologias.com.br' }}
   MLFLOW_TRACKING_SERVER_NAME: ${{ vars.MLFLOW_TRACKING_SERVER_NAME || 'smus-integration-mlflow-us-east-1' }}
   MLFLOW_TRACKING_SERVER_ARN: ${{ vars.MLFLOW_TRACKING_SERVER_ARN }}
 
