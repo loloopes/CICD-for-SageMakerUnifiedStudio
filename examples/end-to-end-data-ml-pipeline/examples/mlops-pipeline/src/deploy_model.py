@@ -22,9 +22,13 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
+import tarfile
+import tempfile
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import boto3
 
@@ -32,6 +36,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = "/opt/ml/processing/output"
+# Shipped next to this script via the deploy_pipeline ProcessingInput.
+INFERENCE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inference.py")
 
 # Sentinel value used by the promote/deploy GitHub workflows when an optional
 # CLI flag is unset. Translates to "no override" for ARN/URL pinning.
@@ -173,6 +179,75 @@ def extract_model_data_url(model_package):
 # =============================================================================
 
 
+def _parse_s3_uri(s3_uri: str) -> tuple[str, str]:
+    parsed = urlparse(s3_uri)
+    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path:
+        raise ValueError(f"Invalid S3 URI: {s3_uri}")
+    return parsed.netloc, parsed.path.lstrip("/")
+
+
+def package_realtime_serving_artifact(
+    s3,
+    source_model_data_url: str,
+    dest_model_data_url: str,
+    model_name: str,
+    model_version: str,
+    inference_script: str = INFERENCE_SCRIPT,
+) -> str:
+    """Rebuild model.tar.gz with ``code/inference.py`` + serving metadata.
+
+    Realtime InvokeEndpoint then returns JSON rows with score, model_name,
+    model_version, and inference_timestamp (see ``inference.py``).
+    """
+    if not os.path.isfile(inference_script):
+        raise FileNotFoundError(f"Realtime inference script not found: {inference_script}")
+
+    src_bucket, src_key = _parse_s3_uri(source_model_data_url)
+    dest_bucket, dest_key = _parse_s3_uri(dest_model_data_url)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        local_tar = os.path.join(tmp, "source-model.tar.gz")
+        extract_dir = os.path.join(tmp, "extracted")
+        os.makedirs(extract_dir, exist_ok=True)
+
+        logger.info(f"Downloading model artifact: {source_model_data_url}")
+        s3.download_file(src_bucket, src_key, local_tar)
+
+        with tarfile.open(local_tar, "r:gz") as tar:
+            tar.extractall(path=extract_dir)
+
+        code_dir = os.path.join(extract_dir, "code")
+        os.makedirs(code_dir, exist_ok=True)
+        shutil.copy2(inference_script, os.path.join(code_dir, "inference.py"))
+        meta = {
+            "model_name": model_name,
+            "model_version": str(model_version),
+        }
+        with open(os.path.join(code_dir, "serving_meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, sort_keys=True)
+
+        model_file = os.path.join(extract_dir, "xgboost-model")
+        if not os.path.isfile(model_file):
+            # Some packages nest the booster; keep whatever was extracted but warn.
+            logger.warning(
+                "xgboost-model not found at artifact root; "
+                f"contents={sorted(os.listdir(extract_dir))}"
+            )
+
+        out_tar = os.path.join(tmp, "serving-model.tar.gz")
+        with tarfile.open(out_tar, "w:gz") as tar:
+            for root, _dirs, files in os.walk(extract_dir):
+                for name in files:
+                    full = os.path.join(root, name)
+                    arcname = os.path.relpath(full, extract_dir)
+                    tar.add(full, arcname=arcname)
+
+        logger.info(f"Uploading realtime serving artifact: {dest_model_data_url}")
+        s3.upload_file(out_tar, dest_bucket, dest_key)
+
+    return dest_model_data_url
+
+
 def create_sagemaker_model(
     sm,
     model_name,
@@ -181,6 +256,8 @@ def create_sagemaker_model(
     model_data_url,
     execution_role_arn,
     prefer_data_url=False,
+    model_version: str = "unknown",
+    use_realtime_inference_script: bool = False,
 ):
     """Create a SageMaker Model.
 
@@ -188,8 +265,14 @@ def create_sagemaker_model(
     When ``prefer_data_url`` is True (promote staged the artifact into the target
     project's bucket), skip the package path — ModelPackageName always points at
     the *source* ModelDataUrl, which the target stage role often cannot read.
+
+    When ``use_realtime_inference_script`` is True, always create from image +
+    ModelDataUrl and set container env so ``code/inference.py`` enriches responses.
     """
     logger.info(f"Creating SageMaker model: {model_name}")
+
+    if use_realtime_inference_script:
+        prefer_data_url = True
 
     if not prefer_data_url:
         try:
@@ -204,12 +287,22 @@ def create_sagemaker_model(
             logger.warning(f"  Model package approach failed: {e}")
             logger.info(f"  Falling back to image + model data URL")
 
+    container = {
+        "Image": image_uri,
+        "ModelDataUrl": model_data_url,
+    }
+    if use_realtime_inference_script:
+        container["Environment"] = {
+            "SAGEMAKER_PROGRAM": "inference.py",
+            "SAGEMAKER_SUBMIT_DIRECTORY": "/opt/ml/model/code",
+            "MODEL_NAME": model_name,
+            "MODEL_VERSION": str(model_version),
+        }
+        logger.info("  Realtime enrichment enabled (inference.py)")
+
     sm.create_model(
         ModelName=model_name,
-        PrimaryContainer={
-            "Image": image_uri,
-            "ModelDataUrl": model_data_url,
-        },
+        PrimaryContainer=container,
         ExecutionRoleArn=execution_role_arn,
     )
     logger.info(f"  Created from image + data URL")
@@ -382,6 +475,7 @@ def main():
         return
 
     model_package_arn = model_package["ModelPackageArn"]
+    model_version = str(model_package.get("ModelPackageVersion", "unknown"))
     model_data_url = extract_model_data_url(model_package)
     data_url_override = _clean(args.model_data_url_override)
     if data_url_override:
@@ -392,19 +486,48 @@ def main():
         model_data_url = data_url_override
     logger.info(f"  Model data: {model_data_url}")
 
-    # Step 2: Create SageMaker Model
+    # Step 2: Create SageMaker Model (with realtime enrichment script)
     logger.info("[2/5] Creating SageMaker model")
     model_name = f"{args.endpoint_name}-{int(time.time())}"
-    # Staged overrides must use image + ModelDataUrl so the endpoint downloads
-    # from the target project bucket the stage role can actually read.
+    s3 = boto3.client("s3", region_name=args.region)
+    # Serve from a project-local artifact that embeds code/inference.py so
+    # InvokeEndpoint returns score + model identity + timestamp.
+    src_bucket = urlparse(model_data_url).netloc
+    src_key = urlparse(model_data_url).path.lstrip("/")
+    shared_marker = "/shared/"
+    if shared_marker in src_key:
+        shared_root = src_key.split(shared_marker, 1)[0] + shared_marker
+        serving_uri = (
+            f"s3://{src_bucket}/{shared_root}"
+            f"stack/mlops_pipeline/deployments/realtime-serving/{model_name}/model.tar.gz"
+        )
+    else:
+        serving_uri = (
+            f"s3://{src_bucket}/stack/mlops_pipeline/deployments/"
+            f"realtime-serving/{model_name}/model.tar.gz"
+        )
+
+    logger.info(f"  Packaging realtime serving artifact → {serving_uri}")
+    serving_model_data_url = package_realtime_serving_artifact(
+        s3,
+        source_model_data_url=model_data_url,
+        dest_model_data_url=serving_uri,
+        model_name=model_name,
+        model_version=model_version,
+    )
+
+    # Always use image + ModelDataUrl so the custom inference.py is active.
+    # Staged overrides already required this path for cross-bucket reads.
     create_sagemaker_model(
         sm,
         model_name,
         model_package_arn,
         args.image_uri,
-        model_data_url,
+        serving_model_data_url,
         args.execution_role_arn,
-        prefer_data_url=bool(data_url_override),
+        prefer_data_url=True,
+        model_version=model_version,
+        use_realtime_inference_script=True,
     )
 
     # Step 3: Deploy endpoint
@@ -418,8 +541,11 @@ def main():
         "model_package_arn": model_package_arn,
         "model_package_group": args.model_package_group,
         "model_name": model_name,
+        "model_version": model_version,
         "model_data_url": model_data_url,
+        "serving_model_data_url": serving_model_data_url,
         "model_data_url_overridden": bool(data_url_override),
+        "realtime_enrichment": True,
         "endpoint_name": args.endpoint_name,
         "endpoint_arn": endpoint_info.get("EndpointArn"),
         "endpoint_status": endpoint_info.get("EndpointStatus"),
