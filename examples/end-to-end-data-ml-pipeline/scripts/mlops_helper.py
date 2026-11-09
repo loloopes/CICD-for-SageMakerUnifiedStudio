@@ -469,23 +469,70 @@ def _load_payload(sample_csv: str) -> str:
     return DEFAULT_SAMPLE
 
 
-def _parse_response(body_bytes: bytes) -> list[float]:
+def _parse_response(body_bytes: bytes) -> tuple[list[float], list[dict]]:
+    """Parse endpoint body as enriched JSON or legacy raw CSV scores.
+
+    Returns ``(scores, rows)`` where ``rows`` is the JSON list when present
+    (each item may include model_name / model_version / inference_timestamp),
+    otherwise an empty list for legacy float-only responses.
+    """
     text = body_bytes.decode("utf-8").strip()
-    scores: list[float] = []
+    if not text:
+        return [], []
+
+    # Realtime enrichment (inference.py): JSON array of objects with "score".
+    if text.startswith("[") or text.startswith("{"):
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            payload = [payload]
+        if not isinstance(payload, list):
+            raise ValueError(f"Unexpected JSON response type: {type(payload).__name__}")
+        scores: list[float] = []
+        rows: list[dict] = []
+        for item in payload:
+            if isinstance(item, dict) and "score" in item:
+                scores.append(float(item["score"]))
+                rows.append(item)
+            else:
+                scores.append(float(item))
+                rows.append({"score": float(item)})
+        return scores, rows
+
+    # Legacy / CSV Accept: plain floats or headered enriched CSV.
+    scores = []
+    reader = csv.DictReader(io.StringIO(text)) if "score" in text.splitlines()[0].lower() else None
+    if reader is not None and reader.fieldnames and "score" in {
+        (f or "").strip().lower() for f in reader.fieldnames
+    }:
+        rows = []
+        for row in reader:
+            score = float(str(row.get("score", "")).strip())
+            scores.append(score)
+            rows.append(
+                {
+                    "score": score,
+                    "model_name": (row.get("model_name") or "").strip(),
+                    "model_version": (row.get("model_version") or "").strip(),
+                    "inference_timestamp": (row.get("inference_timestamp") or "").strip(),
+                }
+            )
+        return scores, rows
+
     reader = csv.reader(io.StringIO(text))
     for row in reader:
         for cell in row:
             cell = cell.strip()
             if cell:
                 scores.append(float(cell))
-    return scores
+    return scores, []
 
 
 def _resolve_endpoint_model_identity(sm, endpoint_name: str) -> tuple[str, str, str]:
     """Return ``(model_name, model_version, sagemaker_model_name)`` for an endpoint.
 
     Prefers Model Registry package group + version when the endpoint model was
-    created from a package; otherwise falls back to the SageMaker Model name.
+    created from a package; otherwise uses MODEL_NAME / MODEL_VERSION env on
+    the container (realtime enrichment deploy), then the SageMaker Model name.
     """
     ep = sm.describe_endpoint(EndpointName=endpoint_name)
     cfg = sm.describe_endpoint_config(EndpointConfigName=ep["EndpointConfigName"])
@@ -505,18 +552,40 @@ def _resolve_endpoint_model_identity(sm, endpoint_name: str) -> tuple[str, str, 
         version = str(details.get("ModelPackageVersion", "unknown"))
         return group, version, sm_model_name
 
+    for container in containers:
+        env = container.get("Environment") or {}
+        env_name = env.get("MODEL_NAME") or sm_model_name
+        env_version = env.get("MODEL_VERSION") or "unknown"
+        if env.get("MODEL_NAME") or env.get("MODEL_VERSION"):
+            return env_name, str(env_version), sm_model_name
+
     return sm_model_name, "unknown", sm_model_name
 
 
 def _format_enriched_predictions(
-    scores: list[float], model_name: str, model_version: str, inference_timestamp: str
+    scores: list[float],
+    model_name: str,
+    model_version: str,
+    inference_timestamp: str,
+    rows: list[dict] | None = None,
 ) -> str:
     """CSV with score, model_name, model_version, inference_timestamp."""
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["score", "model_name", "model_version", "inference_timestamp"])
-    for score in scores:
-        writer.writerow([score, model_name, model_version, inference_timestamp])
+    if rows:
+        for row in rows:
+            writer.writerow(
+                [
+                    row.get("score"),
+                    row.get("model_name") or model_name,
+                    row.get("model_version") or model_version,
+                    row.get("inference_timestamp") or inference_timestamp,
+                ]
+            )
+    else:
+        for score in scores:
+            writer.writerow([score, model_name, model_version, inference_timestamp])
     return buf.getvalue()
 
 
@@ -578,9 +647,10 @@ def cmd_smoke_test(args: argparse.Namespace) -> int:
     response = runtime.invoke_endpoint(
         EndpointName=args.endpoint_name,
         ContentType="text/csv",
+        Accept="application/json",
         Body=payload,
     )
-    scores = _parse_response(response["Body"].read())
+    scores, response_rows = _parse_response(response["Body"].read())
 
     if len(scores) != rows:
         logger.error(f"Expected {rows} scores, got {len(scores)}")
@@ -591,8 +661,18 @@ def cmd_smoke_test(args: argparse.Namespace) -> int:
         logger.error(f"Out-of-range scores: {out_of_range}")
         return 4
 
+    # Prefer identity returned by realtime inference.py when present.
+    if response_rows:
+        model_name = str(response_rows[0].get("model_name") or model_name)
+        model_version = str(response_rows[0].get("model_version") or model_version)
+        inference_timestamp = str(
+            response_rows[0].get("inference_timestamp") or inference_timestamp
+        )
+        logger.info(f"  Model    : {model_name} (from response)")
+        logger.info(f"  Version  : {model_version} (from response)")
+
     enriched = _format_enriched_predictions(
-        scores, model_name, model_version, inference_timestamp
+        scores, model_name, model_version, inference_timestamp, rows=response_rows
     )
     logger.info("Enriched live output (score, model_name, model_version, inference_timestamp):")
     for line in enriched.strip().splitlines():
