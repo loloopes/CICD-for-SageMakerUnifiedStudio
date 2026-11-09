@@ -28,6 +28,8 @@ training_pipeline:
       update_config: true
       script_args:
         "--INPUT_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/transformed/"
+        # Raw source snapshotted into features/drift_reference/ for the drift gate.
+        "--SOURCE_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/data/stack-sample.csv"
         "--OUTPUT_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/data/bank_mktg/features/"
         "--CATALOG_DB": "{env.ATHENA_DB_NAME}"
         "--TABLE_PREFIX": "features"

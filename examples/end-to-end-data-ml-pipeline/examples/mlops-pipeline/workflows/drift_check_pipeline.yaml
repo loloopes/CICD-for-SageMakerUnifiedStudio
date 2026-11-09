@@ -1,8 +1,9 @@
 # =============================================================================
 # Bank Mktg Drift Check Pipeline
 # =============================================================================
-# Compares current DataOps transformed data against the last training
-# reference snapshot. Writes result.json for the GitHub Actions train gate.
+# Compares live raw SOURCE (CSV today; S3 table later) against the snapshot
+# taken when training last read that source (features/drift_reference/).
+# Writes result.json for the GitHub Actions train gate.
 # Does not train or deploy — always succeeds; the gate reads drift_detected.
 # =============================================================================
 
@@ -24,7 +25,8 @@ drift_check_pipeline:
       region_name: "{domain.region}"
       update_config: true
       script_args:
-        "--CURRENT_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/transformed/"
+        # Same path as data_pipeline ingest --source_path (swap for S3 table later).
+        "--CURRENT_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/data/stack-sample.csv"
         "--REFERENCE_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/data/bank_mktg/features/drift_reference/"
         "--REPORT_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/data/bank_mktg/drift_reports/{{ ts_nodash }}/"
         "--PSI_THRESHOLD": "0.2"

@@ -29,10 +29,21 @@ def monitor_command(
         _monitor_once(targets, manifest_file, output)
 
 
+# Terminal run statuses that mean the monitored DAG did not succeed.
+_FAILED_RUN_STATUSES = frozenset({"FAILED", "STOPPED", "CANCELLED"})
+
+
 def _monitor_live(targets: Optional[str], manifest_file: str, output: str):
-    """Monitor workflows continuously until all runs complete."""
+    """Monitor workflows continuously until all runs complete.
+
+    Exits with code 1 if any watched run transitions to a failed terminal
+    status (FAILED / STOPPED / CANCELLED) during this live session. Completing
+    with only SUCCESS/COMPLETED (or no transitions) exits 0.
+    """
     # Track previous run states
     previous_states = {}
+    # Runs that failed while we were watching (workflow_name, run_id, status)
+    failed_runs: list[tuple[str, str, str]] = []
 
     # Initial full display
     typer.echo("🔄 Starting live monitoring... (Press Ctrl+C to stop)\n")
@@ -44,21 +55,36 @@ def _monitor_live(targets: Optional[str], manifest_file: str, output: str):
 
             # Check for status changes
             has_running = _check_status_changes(
-                targets, manifest_file, output, previous_states
+                targets,
+                manifest_file,
+                output,
+                previous_states,
+                failed_runs=failed_runs,
             )
 
             # If no workflows are running, exit
             if not has_running:
-                typer.echo("\n✅ All workflows completed")
                 break
 
     except KeyboardInterrupt:
         typer.echo("\n\n⏹️  Monitoring stopped by user")
         raise typer.Exit(0)
 
+    if failed_runs:
+        typer.echo("\n❌ Workflow run(s) failed during monitoring:", err=True)
+        for workflow_name, run_id, status in failed_runs:
+            typer.echo(f"   - {workflow_name} (run {run_id}): {status}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo("\n✅ All workflows completed successfully")
+
 
 def _check_status_changes(
-    targets: Optional[str], manifest_file: str, output: str, previous_states: dict
+    targets: Optional[str],
+    manifest_file: str,
+    output: str,
+    previous_states: dict,
+    failed_runs: Optional[list] = None,
 ) -> bool:
     """Check for workflow status changes and report them. Returns True if any workflows are running."""
     manifest = ApplicationManifest.from_file(manifest_file)
@@ -134,6 +160,13 @@ def _check_status_changes(
                         typer.echo(
                             f"[{timestamp}] {workflow_name} (run {run_id[:8]}...): {prev_status} → {run_status}"
                         )
+                        # Only count failures that occur while we are watching
+                        # (ignore pre-existing FAILED latest runs of other DAGs).
+                        if (
+                            failed_runs is not None
+                            and run_status in _FAILED_RUN_STATUSES
+                        ):
+                            failed_runs.append((workflow_name, run_id, run_status))
 
                     # Update state
                     previous_states[key] = run_status

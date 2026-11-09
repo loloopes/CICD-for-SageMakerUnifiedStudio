@@ -147,7 +147,8 @@ jobs:
       - name: Install CLI
         # aws-smus-cicd-cli is needed so mlops_helper.py can reuse the packaged
         # smus_cicd.helpers.datazone resolution (domain + project lookup).
-        run: pip install aws-smus-cicd-cli pyyaml boto3 -q
+        # Install from this checkout so monitor --live failure exit codes apply.
+        run: pip install -e . -q
 
       - name: Pick model package
         id: pick
@@ -235,7 +236,8 @@ jobs:
           aws-region: ${{ vars.DOMAIN_REGION || 'us-east-1' }}
 
       - name: Install CLI
-        run: pip install aws-smus-cicd-cli pyyaml boto3 -q
+        # Install from this checkout so monitor --live failure exit codes apply.
+        run: pip install -e . -q
 
       - name: Export workflow env for manifest substitution
         env:
@@ -257,7 +259,9 @@ jobs:
 
       - name: Run deploy_pipeline DAG
         working-directory: ${{ env.MANIFEST_DIR }}
+        # monitor --live exits 1 if the DAG run transitions to FAILED/STOPPED/CANCELLED.
         run: |
+          set -euo pipefail
           aws-smus-cicd-cli run --manifest manifest.yaml --targets "$STAGE" --workflow "$WORKFLOW_NAME"
           aws-smus-cicd-cli monitor --manifest manifest.yaml --targets "$STAGE" --live
 
@@ -370,7 +374,8 @@ jobs:
           aws-region: ${{ vars.DOMAIN_REGION || 'us-east-1' }}
 
       - name: Install CLI
-        run: pip install aws-smus-cicd-cli pyyaml boto3 -q
+        # Install from this checkout so monitor --live failure exit codes apply.
+        run: pip install -e . -q
 
       - name: Export workflow env for manifest substitution
         env:
@@ -398,7 +403,9 @@ jobs:
 
       - name: Run deploy_pipeline DAG
         working-directory: ${{ env.MANIFEST_DIR }}
+        # monitor --live exits 1 if the DAG run transitions to FAILED/STOPPED/CANCELLED.
         run: |
+          set -euo pipefail
           aws-smus-cicd-cli run --manifest manifest.yaml --targets "$STAGE" --workflow "$WORKFLOW_NAME"
           aws-smus-cicd-cli monitor --manifest manifest.yaml --targets "$STAGE" --live
 
@@ -511,7 +518,8 @@ jobs:
           aws-region: ${{ vars.DOMAIN_REGION || 'us-east-1' }}
 
       - name: Install CLI
-        run: pip install aws-smus-cicd-cli pyyaml boto3 -q
+        # Install from this checkout so monitor --live failure exit codes apply.
+        run: pip install -e . -q
 
       - name: Export workflow env for manifest substitution
         env:
@@ -539,7 +547,9 @@ jobs:
 
       - name: Run deploy_pipeline DAG
         working-directory: ${{ env.MANIFEST_DIR }}
+        # monitor --live exits 1 if the DAG run transitions to FAILED/STOPPED/CANCELLED.
         run: |
+          set -euo pipefail
           aws-smus-cicd-cli run --manifest manifest.yaml --targets "$STAGE" --workflow "$WORKFLOW_NAME"
           aws-smus-cicd-cli monitor --manifest manifest.yaml --targets "$STAGE" --live
 

@@ -67,7 +67,8 @@ jobs:
           role-session-name: smus-mlops-train-session
 
       - name: Install CLI
-        run: pip install aws-smus-cicd-cli pyyaml boto3 -q
+        # Install from this checkout so monitor --live failure exit codes apply.
+        run: pip install -e . -q
 
       - name: Validate target (describe --connect)
         working-directory: ${{ env.MANIFEST_DIR }}
@@ -75,11 +76,14 @@ jobs:
 
       - name: Run training_pipeline DAG
         working-directory: ${{ env.MANIFEST_DIR }}
+        # monitor --live exits 1 if the DAG run transitions to FAILED/STOPPED/CANCELLED.
         run: |
+          set -euo pipefail
           aws-smus-cicd-cli run --manifest manifest.yaml --targets "$STAGE" --workflow "$WORKFLOW_NAME"
           aws-smus-cicd-cli monitor --manifest manifest.yaml --targets "$STAGE" --live
 
       - name: Summary
+        if: ${{ success() }}
         run: |
           {
             echo "### Training pipeline finished"

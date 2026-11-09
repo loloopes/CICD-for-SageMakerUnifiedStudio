@@ -12,7 +12,8 @@ Features:
   - Economic indicators: emp_var_rate, cons_price_idx, cons_conf_idx, euribor3m, nr_employed
 
 Glue job args:
-    --INPUT_PATH      s3://bucket/data/bank_mktg/raw/validated/
+    --INPUT_PATH      s3://bucket/.../transformed/ (DataOps analytics path)
+    --SOURCE_PATH     s3://bucket/.../stack-sample.csv (raw source; snapshotted for drift)
     --OUTPUT_PATH     s3://bucket/data/bank_mktg/features/
     --CATALOG_DB      Project catalog database name (provisioned by DataZone/SMUS)
     --TABLE_PREFIX    Prefix for catalog table names (train/validation/test)
@@ -22,22 +23,24 @@ Glue job args:
     --RANDOM_SEED     42
 """
 
-import sys
 import logging
-from awsglue.utils import getResolvedOptions
+import re
+import sys
+
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
+from pyspark.ml import Pipeline
+from pyspark.ml.feature import StringIndexer
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType
-from pyspark.ml.feature import StringIndexer
-from pyspark.ml import Pipeline
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 args = getResolvedOptions(sys.argv, [
-    'JOB_NAME', 'INPUT_PATH', 'OUTPUT_PATH', 'CATALOG_DB', 'TABLE_PREFIX',
+    'JOB_NAME', 'INPUT_PATH', 'SOURCE_PATH', 'OUTPUT_PATH', 'CATALOG_DB', 'TABLE_PREFIX',
     'TRAIN_RATIO', 'VAL_RATIO', 'TEST_RATIO', 'RANDOM_SEED'
 ])
 
@@ -48,6 +51,7 @@ job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
 INPUT_PATH = args['INPUT_PATH']
+SOURCE_PATH = args['SOURCE_PATH']
 OUTPUT_PATH = args['OUTPUT_PATH']
 CATALOG_DB = args['CATALOG_DB']
 TABLE_PREFIX = args['TABLE_PREFIX']
@@ -55,6 +59,15 @@ TRAIN_RATIO = float(args['TRAIN_RATIO'])
 VAL_RATIO = float(args['VAL_RATIO'])
 TEST_RATIO = float(args['TEST_RATIO'])
 RANDOM_SEED = int(args['RANDOM_SEED'])
+
+
+def _clean_column_names(df):
+    """Match DataOps ingest column sanitization so drift schemas align."""
+    cleaned = []
+    for c in df.columns:
+        name = re.sub(r'[^a-zA-Z0-9_.]', '', c).replace('.', '_')
+        cleaned.append(name)
+    return df.toDF(*cleaned)
 
 # -------------------------------------------------------------------------
 # 1. Ensure catalog database exists, register source table, and load data
@@ -87,13 +100,17 @@ logger.info(f"Reading validated data from catalog table {CATALOG_DB}.{source_tab
 df = spark.sql(f"SELECT * FROM {CATALOG_DB}.{source_table}")
 logger.info(f"Loaded {df.count()} rows, {len(df.columns)} columns")
 
-# Snapshot raw transformed input (DataOps schema) for future drift checks.
-# Overwritten on every successful preprocess so the gate compares against
-# the distribution the currently registered model was trained on.
-logger.info(f"Writing drift reference snapshot to {OUTPUT_PATH}drift_reference/")
-spark.read.parquet(INPUT_PATH).write.mode("overwrite").parquet(
-    f"{OUTPUT_PATH}drift_reference/"
+# Snapshot the raw SOURCE (CSV / future S3 table) as of this train read.
+# Drift check compares live SOURCE_PATH against this reference.
+logger.info(f"Snapshotting source {SOURCE_PATH} → {OUTPUT_PATH}drift_reference/")
+src_df = (
+    spark.read.option("header", "true")
+    .option("inferSchema", "true")
+    .option("sep", ";")
+    .csv(SOURCE_PATH)
 )
+src_df = _clean_column_names(src_df)
+src_df.write.mode("overwrite").parquet(f"{OUTPUT_PATH}drift_reference/")
 
 # -------------------------------------------------------------------------
 # 2. Encode target variable

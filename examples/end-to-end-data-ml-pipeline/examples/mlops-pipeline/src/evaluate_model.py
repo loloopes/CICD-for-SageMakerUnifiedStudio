@@ -181,15 +181,28 @@ def write_enriched_predictions(
 
     ``table_uri`` is a stable S3 prefix (e.g. .../evaluation/predictions_enriched)
     so successive evaluate / batch runs accumulate rows instead of overwriting.
+
+    Converts via PyArrow explicitly — newer ``deltalake`` rejects raw pandas
+    DataFrames in the sklearn processing image (Arrow C stream mismatch).
     """
     try:
         import subprocess
 
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-q", "deltalake", "pandas"],
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-q",
+                "deltalake",
+                "pandas",
+                "pyarrow",
+            ],
             stdout=subprocess.DEVNULL,
         )
         import pandas as pd
+        import pyarrow as pa
         from deltalake import write_deltalake
     except Exception as e:
         raise RuntimeError(
@@ -205,7 +218,7 @@ def write_enriched_predictions(
         }
     )
     uri = table_uri.rstrip("/")
-    write_deltalake(uri, df, mode="append")
+    write_deltalake(uri, pa.Table.from_pandas(df, preserve_index=False), mode="append")
     logger.info(f"Appended {len(scores)} enriched predictions to Delta table {uri}")
     return uri
 

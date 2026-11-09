@@ -1,8 +1,9 @@
 """
 Glue Job: Data Drift Check
 ==========================
-Compares current DataOps transformed data against the last training
-reference snapshot (written by feature_engineering.py).
+Compares the live raw SOURCE (CSV today; S3 table later) against the
+reference snapshot taken when training last read that source
+(feature_engineering.py → features/drift_reference/).
 
 Numeric columns: Population Stability Index (PSI) over fixed quantile bins.
 Categorical columns: max absolute share delta across categories.
@@ -11,7 +12,7 @@ Always succeeds and writes result.json — the GitHub Actions gate decides
 whether to retrain. Missing/empty reference => drift_detected=true (bootstrap).
 
 Args:
-    --CURRENT_PATH     s3://.../stack/data_pipeline/output/transformed/
+    --CURRENT_PATH     s3://.../stack/data_pipeline/data/stack-sample.csv (or table path)
     --REFERENCE_PATH   s3://.../stack/mlops_pipeline/data/bank_mktg/features/drift_reference/
     --REPORT_PATH      s3://.../stack/mlops_pipeline/data/bank_mktg/drift_reports/<run>/
     --PSI_THRESHOLD    Drift threshold for PSI and categorical share delta (default 0.2)
@@ -20,6 +21,7 @@ Args:
 import json
 import logging
 import math
+import re
 import sys
 from typing import Optional
 
@@ -49,21 +51,57 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-CURRENT_PATH = args["CURRENT_PATH"].rstrip("/") + "/"
-REFERENCE_PATH = args["REFERENCE_PATH"].rstrip("/") + "/"
-REPORT_PATH = args["REPORT_PATH"].rstrip("/") + "/"
+# Keep file paths as-is (e.g. *.csv); normalize directory prefixes with a slash.
+def _normalize_path(path: str) -> str:
+    path = path.strip()
+    if path.lower().endswith((".csv", ".json", ".parquet")):
+        return path
+    return path.rstrip("/") + "/"
+
+
+CURRENT_PATH = _normalize_path(args["CURRENT_PATH"])
+REFERENCE_PATH = _normalize_path(args["REFERENCE_PATH"])
+REPORT_PATH = _normalize_path(args["REPORT_PATH"])
 PSI_THRESHOLD = float(args["PSI_THRESHOLD"])
 
 
-def _try_read_parquet(path: str) -> Optional[DataFrame]:
-    """Return a DataFrame if path exists and has rows, else None."""
+def _clean_column_names(df: DataFrame) -> DataFrame:
+    """Match DataOps ingest / FE snapshot column sanitization."""
+    cleaned = []
+    for c in df.columns:
+        name = re.sub(r"[^a-zA-Z0-9_.]", "", c).replace(".", "_")
+        cleaned.append(name)
+    return df.toDF(*cleaned)
+
+
+def _try_read_dataset(path: str) -> Optional[DataFrame]:
+    """Read parquet directory or CSV source; return None if missing/empty."""
     try:
-        df = spark.read.parquet(path)
+        if path.lower().endswith(".csv") or path.rstrip("/").lower().endswith(".csv"):
+            df = (
+                spark.read.option("header", "true")
+                .option("inferSchema", "true")
+                .option("sep", ";")
+                .csv(path)
+            )
+            df = _clean_column_names(df)
+        else:
+            try:
+                df = spark.read.parquet(path)
+            except Exception:
+                # Future S3 table / prefix of CSV objects
+                df = (
+                    spark.read.option("header", "true")
+                    .option("inferSchema", "true")
+                    .option("sep", ";")
+                    .csv(path)
+                )
+                df = _clean_column_names(df)
         if df.head(1) is None:
             return None
         return df
-    except Exception as exc:  # noqa: BLE001 — empty/missing S3 prefix is expected
-        logger.warning(f"Could not read parquet at {path}: {exc}")
+    except Exception as exc:  # noqa: BLE001 — empty/missing S3 path is expected
+        logger.warning(f"Could not read dataset at {path}: {exc}")
         return None
 
 
@@ -170,7 +208,7 @@ logger.info(f"REFERENCE_PATH : {REFERENCE_PATH}")
 logger.info(f"REPORT_PATH    : {REPORT_PATH}")
 logger.info(f"PSI_THRESHOLD  : {PSI_THRESHOLD}")
 
-ref_df = _try_read_parquet(REFERENCE_PATH)
+ref_df = _try_read_dataset(REFERENCE_PATH)
 if ref_df is None:
     _write_result(
         {
@@ -183,7 +221,7 @@ if ref_df is None:
     job.commit()
     sys.exit(0)
 
-cur_df = _try_read_parquet(CURRENT_PATH)
+cur_df = _try_read_dataset(CURRENT_PATH)
 if cur_df is None:
     _write_result(
         {
