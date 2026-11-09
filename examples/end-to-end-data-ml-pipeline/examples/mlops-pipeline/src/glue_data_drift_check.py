@@ -115,6 +115,8 @@ def _psi_for_column(ref_df: DataFrame, cur_df: DataFrame, col_name: str) -> floa
 
     ref_vals = ref_df.select(F.col(col_name).cast("double").alias(col_name)).dropna()
     cur_vals = cur_df.select(F.col(col_name).cast("double").alias(col_name)).dropna()
+    if ref_vals.head(1) is None or cur_vals.head(1) is None:
+        return 0.0
 
     probs = [i / N_BINS for i in range(N_BINS + 1)]
     edges = ref_vals.approxQuantile(col_name, probs, 0.01)
@@ -125,14 +127,24 @@ def _psi_for_column(ref_df: DataFrame, cur_df: DataFrame, col_name: str) -> floa
     if len(unique_edges) < 2:
         return 0.0
 
-    # Bucketizer needs open-ended outer edges
-    splits = [float("-inf")] + unique_edges[1:-1] + [float("inf")]
-    # Ensure strictly increasing after injecting inf
-    cleaned = [splits[0]]
-    for e in splits[1:]:
-        if e > cleaned[-1]:
+    lo, hi = unique_edges[0], unique_edges[-1]
+    if hi <= lo:
+        return 0.0
+
+    # Bucketizer rejects [-inf, inf] alone. Always keep at least one finite
+    # interior boundary (lo/hi or quantile interiors).
+    interior = [e for e in unique_edges[1:-1] if lo < e < hi]
+    if interior:
+        raw_splits = [float("-inf")] + interior + [float("inf")]
+    else:
+        raw_splits = [float("-inf"), lo, hi, float("inf")]
+
+    cleaned = []
+    for e in raw_splits:
+        if not cleaned or e > cleaned[-1]:
             cleaned.append(e)
-    if len(cleaned) < 2:
+    # Need >= 3 split points to form at least one finite-width bin
+    if len(cleaned) < 3:
         return 0.0
 
     bucketizer = Bucketizer(
@@ -209,6 +221,8 @@ logger.info(f"REPORT_PATH    : {REPORT_PATH}")
 logger.info(f"PSI_THRESHOLD  : {PSI_THRESHOLD}")
 
 ref_df = _try_read_dataset(REFERENCE_PATH)
+cur_df = _try_read_dataset(CURRENT_PATH) if ref_df is not None else None
+
 if ref_df is None:
     _write_result(
         {
@@ -218,11 +232,7 @@ if ref_df is None:
             "columns": [],
         }
     )
-    job.commit()
-    sys.exit(0)
-
-cur_df = _try_read_dataset(CURRENT_PATH)
-if cur_df is None:
+elif cur_df is None:
     _write_result(
         {
             "drift_detected": True,
@@ -231,51 +241,49 @@ if cur_df is None:
             "columns": [],
         }
     )
-    job.commit()
-    sys.exit(0)
+else:
+    common_cols = [f.name for f in ref_df.schema.fields if f.name in cur_df.columns]
+    ref_types = {f.name: f.dataType for f in ref_df.schema.fields}
 
-common_cols = [f.name for f in ref_df.schema.fields if f.name in cur_df.columns]
-ref_types = {f.name: f.dataType for f in ref_df.schema.fields}
+    column_results = []
+    drift_detected = False
 
-column_results = []
-drift_detected = False
+    for col_name in sorted(common_cols):
+        dtype = ref_types[col_name]
+        if _is_numeric(dtype):
+            metric = _psi_for_column(ref_df, cur_df, col_name)
+            kind = "psi"
+            drifted = metric >= PSI_THRESHOLD
+        else:
+            metric = _categorical_share_delta(ref_df, cur_df, col_name)
+            kind = "share_delta"
+            drifted = metric >= PSI_THRESHOLD
 
-for col_name in sorted(common_cols):
-    dtype = ref_types[col_name]
-    if _is_numeric(dtype):
-        metric = _psi_for_column(ref_df, cur_df, col_name)
-        kind = "psi"
-        drifted = metric >= PSI_THRESHOLD
-    else:
-        metric = _categorical_share_delta(ref_df, cur_df, col_name)
-        kind = "share_delta"
-        drifted = metric >= PSI_THRESHOLD
+        column_results.append(
+            {
+                "column": col_name,
+                "metric_type": kind,
+                "metric_value": round(metric, 6),
+                "threshold": PSI_THRESHOLD,
+                "drifted": drifted,
+            }
+        )
+        if drifted:
+            drift_detected = True
+            logger.info(f"DRIFT on {col_name}: {kind}={metric:.4f} >= {PSI_THRESHOLD}")
+        else:
+            logger.info(f"ok    {col_name}: {kind}={metric:.4f}")
 
-    column_results.append(
+    _write_result(
         {
-            "column": col_name,
-            "metric_type": kind,
-            "metric_value": round(metric, 6),
-            "threshold": PSI_THRESHOLD,
-            "drifted": drifted,
+            "drift_detected": drift_detected,
+            "reason": "compared" if column_results else "no_common_columns",
+            "psi_threshold": PSI_THRESHOLD,
+            "reference_path": REFERENCE_PATH,
+            "current_path": CURRENT_PATH,
+            "columns": column_results,
         }
     )
-    if drifted:
-        drift_detected = True
-        logger.info(f"DRIFT on {col_name}: {kind}={metric:.4f} >= {PSI_THRESHOLD}")
-    else:
-        logger.info(f"ok    {col_name}: {kind}={metric:.4f}")
-
-_write_result(
-    {
-        "drift_detected": drift_detected,
-        "reason": "compared" if column_results else "no_common_columns",
-        "psi_threshold": PSI_THRESHOLD,
-        "reference_path": REFERENCE_PATH,
-        "current_path": CURRENT_PATH,
-        "columns": column_results,
-    }
-)
 
 job.commit()
 logger.info("Data drift check completed successfully")
