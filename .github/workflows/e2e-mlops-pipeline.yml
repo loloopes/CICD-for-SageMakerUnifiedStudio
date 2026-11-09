@@ -23,8 +23,13 @@ on:
         required: false
         default: true
         type: boolean
+      check_drift:
+        description: "After deploy, run drift_check_pipeline; train only if drift is detected"
+        required: false
+        default: true
+        type: boolean
       run_training:
-        description: "After deploy, run training_pipeline in dev (registers PendingManualApproval model)"
+        description: "Force training_pipeline in dev after deploy (skips the drift gate)"
         required: false
         default: false
         type: boolean
@@ -151,11 +156,105 @@ jobs:
       # Ensures the MLflow tracking server exists (creates it only if missing).
       setup_mlflow: true
 
-  # Optional: kick off training after a successful deploy (workflow_dispatch only).
+  # Optional: compare current DataOps data vs last training reference (workflow_dispatch).
+  # Missing reference / result => drift_detected=true so the first train can bootstrap.
+  drift-check:
+    name: Check data drift (dev)
+    needs: [resolve-config, deploy]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.check_drift && needs.deploy.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: ${{ needs.resolve-config.outputs.dev_environment }}
+    outputs:
+      drift_detected: ${{ steps.read.outputs.drift_detected }}
+      reason: ${{ steps.read.outputs.reason }}
+      result_uri: ${{ steps.read.outputs.result_uri }}
+    env:
+      STAGE: dev
+      MANIFEST_DIR: examples/end-to-end-data-ml-pipeline/examples/mlops-pipeline
+      WORKFLOW_NAME: drift_check_pipeline
+      DEV_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
+      TEST_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
+      PROD_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
+      DEV_PROJECT_NAME: ${{ vars.DEV_PROJECT_NAME || 'e2e-data-stack-ml-ops-dev' }}
+      TEST_PROJECT_NAME: ${{ vars.TEST_PROJECT_NAME || 'e2e-data-stack-ml-ops-test' }}
+      PROD_PROJECT_NAME: ${{ vars.PROD_PROJECT_NAME || 'e2e-data-stack-ml-ops-prod' }}
+      DOMAIN_TAG_PURPOSE: ${{ vars.DOMAIN_TAG_PURPOSE }}
+      PROJECT_OWNER_ARN: ${{ secrets.PROJECT_OWNER_ARN || 'arn:aws:iam:::user/lopes@stacktecnologias.com.br' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Authenticate via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets[needs.resolve-config.outputs.dev_role_secret] }}
+          aws-region: ${{ vars.DOMAIN_REGION || 'us-east-1' }}
+          role-session-name: smus-mlops-drift-session
+
+      - name: Install CLI
+        run: pip install aws-smus-cicd-cli pyyaml boto3 -q
+
+      - name: Run drift_check_pipeline DAG
+        working-directory: ${{ env.MANIFEST_DIR }}
+        run: |
+          aws-smus-cicd-cli run --manifest manifest.yaml --targets "$STAGE" --workflow "$WORKFLOW_NAME"
+          aws-smus-cicd-cli monitor --manifest manifest.yaml --targets "$STAGE" --live
+
+      - name: Read drift result
+        id: read
+        env:
+          PROJECT_NAME: ${{ needs.resolve-config.outputs.dev_project_name }}
+          REGION: ${{ vars.DOMAIN_REGION || 'us-east-1' }}
+          DOMAIN_TAG_PURPOSE: ${{ vars.DOMAIN_TAG_PURPOSE }}
+        run: |
+          TAGS_ARG=()
+          if [ -n "${DOMAIN_TAG_PURPOSE:-}" ]; then
+            TAGS_ARG=(--domain-tags "purpose=${DOMAIN_TAG_PURPOSE}")
+          fi
+          python3 examples/end-to-end-data-ml-pipeline/scripts/mlops_helper.py read-drift-result \
+            --project-name "$PROJECT_NAME" \
+            --region "$REGION" \
+            "${TAGS_ARG[@]}"
+
+      - name: Summary
+        env:
+          DETECTED: ${{ steps.read.outputs.drift_detected }}
+          REASON: ${{ steps.read.outputs.reason }}
+          RESULT_URI: ${{ steps.read.outputs.result_uri }}
+        run: |
+          {
+            echo "### Data drift check"
+            echo ""
+            echo "- **drift_detected**: \`$DETECTED\`"
+            echo "- **reason**: \`$REASON\`"
+            if [ -n "$RESULT_URI" ]; then
+              echo "- **result**: \`$RESULT_URI\`"
+            fi
+            if [ "$DETECTED" = "true" ]; then
+              echo ""
+              echo "Training will run next (unless cancelled)."
+            else
+              echo ""
+              echo "No drift — training will be skipped (use \`run_training\` to force)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Kick off training after deploy when drift was detected, or when force-train is set.
   # Standalone retrain without redeploy: use e2e-mlops-train.yml.
   train:
     name: Run training_pipeline (dev)
-    needs: [deploy]
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_training && needs.deploy.result == 'success' }}
+    needs: [deploy, drift-check]
+    # always() so force-train still runs when drift-check was skipped (check_drift=false).
+    if: >-
+      always()
+      && github.event_name == 'workflow_dispatch'
+      && needs.deploy.result == 'success'
+      && (inputs.run_training
+          || (inputs.check_drift && needs.drift-check.result == 'success'
+              && needs.drift-check.outputs.drift_detected == 'true'))
     uses: ./.github/workflows/e2e-mlops-train.yml
     secrets: inherit

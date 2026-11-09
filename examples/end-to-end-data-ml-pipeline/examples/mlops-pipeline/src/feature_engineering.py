@@ -87,6 +87,14 @@ logger.info(f"Reading validated data from catalog table {CATALOG_DB}.{source_tab
 df = spark.sql(f"SELECT * FROM {CATALOG_DB}.{source_table}")
 logger.info(f"Loaded {df.count()} rows, {len(df.columns)} columns")
 
+# Snapshot raw transformed input (DataOps schema) for future drift checks.
+# Overwritten on every successful preprocess so the gate compares against
+# the distribution the currently registered model was trained on.
+logger.info(f"Writing drift reference snapshot to {OUTPUT_PATH}drift_reference/")
+spark.read.parquet(INPUT_PATH).write.mode("overwrite").parquet(
+    f"{OUTPUT_PATH}drift_reference/"
+)
+
 # -------------------------------------------------------------------------
 # 2. Encode target variable
 # -------------------------------------------------------------------------

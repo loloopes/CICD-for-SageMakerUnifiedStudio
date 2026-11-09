@@ -48,6 +48,9 @@ content:
       connectionName: default.workflow_serverless
     - workflowName: deploy_pipeline
       connectionName: default.workflow_serverless
+    # Dev-only train gate: compares current DataOps data vs last train reference.
+    - workflowName: drift_check_pipeline
+      connectionName: default.workflow_serverless
 
 stages:
   dev:
@@ -84,6 +87,8 @@ stages:
           workflowName: training_pipeline
         - type: workflow.create
           workflowName: deploy_pipeline
+        - type: workflow.create
+          workflowName: drift_check_pipeline
     deployment_configuration:
       storage:
         - name: src

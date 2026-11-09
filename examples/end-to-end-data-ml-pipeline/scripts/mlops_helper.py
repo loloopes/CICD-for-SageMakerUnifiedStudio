@@ -8,6 +8,7 @@ Subcommands:
     check-deploy-status    Verify the latest deploy_pipeline processing job.
     capture-deploy-logs    Dump the latest deploy job's logs for postmortem.
     smoke-test             Invoke an endpoint and validate the response.
+    read-drift-result      Read drift_check result.json and emit drift_detected.
 
 Each subcommand keeps the same flags as the prior standalone scripts. Exit
 codes are preserved so workflow YAMLs can keep relying on them.
@@ -19,6 +20,7 @@ Usage:
 import argparse
 import csv
 import io
+import json
 import logging
 import os
 import sys
@@ -479,6 +481,45 @@ def _parse_response(body_bytes: bytes) -> list[float]:
     return scores
 
 
+def _resolve_endpoint_model_identity(sm, endpoint_name: str) -> tuple[str, str, str]:
+    """Return ``(model_name, model_version, sagemaker_model_name)`` for an endpoint.
+
+    Prefers Model Registry package group + version when the endpoint model was
+    created from a package; otherwise falls back to the SageMaker Model name.
+    """
+    ep = sm.describe_endpoint(EndpointName=endpoint_name)
+    cfg = sm.describe_endpoint_config(EndpointConfigName=ep["EndpointConfigName"])
+    sm_model_name = cfg["ProductionVariants"][0]["ModelName"]
+    model = sm.describe_model(ModelName=sm_model_name)
+
+    containers = list(model.get("Containers") or [])
+    if model.get("PrimaryContainer"):
+        containers = [model["PrimaryContainer"]] + containers
+
+    for container in containers:
+        pkg_arn = container.get("ModelPackageName")
+        if not pkg_arn:
+            continue
+        details = sm.describe_model_package(ModelPackageName=pkg_arn)
+        group = details.get("ModelPackageGroupName") or sm_model_name
+        version = str(details.get("ModelPackageVersion", "unknown"))
+        return group, version, sm_model_name
+
+    return sm_model_name, "unknown", sm_model_name
+
+
+def _format_enriched_predictions(
+    scores: list[float], model_name: str, model_version: str, inference_timestamp: str
+) -> str:
+    """CSV with score, model_name, model_version, inference_timestamp."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["score", "model_name", "model_version", "inference_timestamp"])
+    for score in scores:
+        writer.writerow([score, model_name, model_version, inference_timestamp])
+    return buf.getvalue()
+
+
 def cmd_smoke_test(args: argparse.Namespace) -> int:
     """Invoke a SageMaker endpoint with a small CSV batch and validate scores.
 
@@ -526,6 +567,14 @@ def cmd_smoke_test(args: argparse.Namespace) -> int:
         logger.error(f"Endpoint not InService (got {status})")
         return 2
 
+    model_name, model_version, sm_model_name = _resolve_endpoint_model_identity(
+        sm, args.endpoint_name
+    )
+    logger.info(f"  Model    : {model_name}")
+    logger.info(f"  Version  : {model_version}")
+    logger.info(f"  SM Model : {sm_model_name}")
+
+    inference_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     response = runtime.invoke_endpoint(
         EndpointName=args.endpoint_name,
         ContentType="text/csv",
@@ -542,8 +591,135 @@ def cmd_smoke_test(args: argparse.Namespace) -> int:
         logger.error(f"Out-of-range scores: {out_of_range}")
         return 4
 
-    logger.info(f"  Scores   : {scores}")
+    enriched = _format_enriched_predictions(
+        scores, model_name, model_version, inference_timestamp
+    )
+    logger.info("Enriched live output (score, model_name, model_version, inference_timestamp):")
+    for line in enriched.strip().splitlines():
+        logger.info(f"  {line}")
+
+    if args.output_csv:
+        with open(args.output_csv, "w", encoding="utf-8") as f:
+            f.write(enriched)
+        logger.info(f"Wrote enriched predictions to {args.output_csv}")
+
+    write_github_output(
+        {
+            "model_name": model_name,
+            "model_version": model_version,
+            "inference_timestamp": inference_timestamp,
+            "scores": ",".join(str(s) for s in scores),
+        }
+    )
     logger.info("✅ Smoke test passed")
+    return 0
+
+
+# =============================================================================
+# read-drift-result
+# =============================================================================
+
+
+def cmd_read_drift_result(args: argparse.Namespace) -> int:
+    """Read drift_check result.json and emit ``drift_detected`` for GHA gates.
+
+    Prefers ``.../drift_reports/latest/result.json`` written by the Glue job.
+    Falls back to the most recently modified ``result.json`` under the reports
+    prefix. Missing result => drift_detected=true (fail-open toward retrain).
+    """
+    if args.domain_id:
+        domain_id = args.domain_id
+    elif args.domain_name:
+        domain_id = _resolve_domain_id(args.region, domain_name=args.domain_name)
+    elif args.domain_tags:
+        domain_id = _resolve_domain_id(
+            args.region, domain_tags=_parse_domain_tags(args.domain_tags)
+        )
+    else:
+        domain_id = _resolve_domain_id(args.region)
+
+    bucket, shared_prefix = _resolve_project_location(
+        domain_id, args.project_name, args.region
+    )
+    reports_rel = args.reports_prefix.strip("/")
+    if shared_prefix.rstrip("/").endswith("/shared") and reports_rel.startswith("shared/"):
+        reports_rel = reports_rel[len("shared/") :]
+    base_prefix = f"{shared_prefix.rstrip('/')}/{reports_rel}".strip("/") + "/"
+
+    s3 = boto3.client("s3", region_name=args.region)
+    latest_key = f"{base_prefix}latest/result.json"
+
+    logger.info("=" * 60)
+    logger.info("READ DRIFT RESULT")
+    logger.info("=" * 60)
+    logger.info(f"  Project : {args.project_name}")
+    logger.info(f"  Domain  : {domain_id}")
+    logger.info(f"  Bucket  : {bucket}")
+    logger.info(f"  Prefix  : {base_prefix}")
+
+    body = None
+    source_key = latest_key
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=latest_key)
+        body = obj["Body"].read().decode("utf-8")
+        logger.info(f"  Source  : s3://{bucket}/{latest_key}")
+    except s3.exceptions.ClientError as e:
+        if e.response["Error"]["Code"] not in {"404", "NoSuchKey", "NotFound"}:
+            raise
+        logger.warning("latest/result.json missing — scanning for newest result.json")
+
+    if body is None:
+        paginator = s3.get_paginator("list_objects_v2")
+        newest = None
+        for page in paginator.paginate(Bucket=bucket, Prefix=base_prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith("/result.json"):
+                    if newest is None or obj["LastModified"] > newest["LastModified"]:
+                        newest = obj
+        if newest is None:
+            logger.warning("No drift result.json found — treating as drift (bootstrap)")
+            write_github_output(
+                {
+                    "drift_detected": "true",
+                    "reason": "no_result",
+                    "result_uri": "",
+                }
+            )
+            return 0
+        source_key = newest["Key"]
+        body = s3.get_object(Bucket=bucket, Key=source_key)["Body"].read().decode("utf-8")
+        logger.info(f"  Source  : s3://{bucket}/{source_key}")
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        logger.error(f"Invalid JSON in drift result: {exc}")
+        write_github_output(
+            {
+                "drift_detected": "true",
+                "reason": "invalid_json",
+                "result_uri": f"s3://{bucket}/{source_key}",
+            }
+        )
+        return 0
+
+    detected = bool(payload.get("drift_detected", True))
+    reason = str(payload.get("reason", "compared"))
+    result_uri = f"s3://{bucket}/{source_key}"
+    logger.info(f"  Detected: {detected}")
+    logger.info(f"  Reason  : {reason}")
+    if payload.get("columns"):
+        drifted_cols = [c["column"] for c in payload["columns"] if c.get("drifted")]
+        logger.info(f"  Columns : {drifted_cols or '(none drifted)'}")
+
+    write_github_output(
+        {
+            "drift_detected": "true" if detected else "false",
+            "reason": reason,
+            "result_uri": result_uri,
+        }
+    )
     return 0
 
 
@@ -615,7 +791,36 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--sample-csv", default="", help="Optional CSV file with feature rows.")
     sp.add_argument("--score-min", type=float, default=0.0)
     sp.add_argument("--score-max", type=float, default=1.0)
+    sp.add_argument(
+        "--output-csv",
+        default="",
+        help="Optional path to write enriched predictions CSV "
+        "(score, model_name, model_version, inference_timestamp).",
+    )
     sp.set_defaults(func=cmd_smoke_test)
+
+    sp = sub.add_parser(
+        "read-drift-result",
+        help="Read drift_check result.json and emit drift_detected for GHA.",
+    )
+    sp.add_argument("--project-name", required=True)
+    sp.add_argument("--region", required=True)
+    domain = sp.add_mutually_exclusive_group(required=False)
+    domain.add_argument("--domain-id", help="DataZone domain id (dzd-...)")
+    domain.add_argument("--domain-name", help="DataZone domain name")
+    domain.add_argument(
+        "--domain-tags",
+        help=(
+            "Comma-separated key=value tags to match a domain, "
+            "e.g. 'purpose=smus-cicd-testing'."
+        ),
+    )
+    sp.add_argument(
+        "--reports-prefix",
+        default="stack/mlops_pipeline/data/bank_mktg/drift_reports",
+        help="Path under the project's default.s3_shared for drift reports.",
+    )
+    sp.set_defaults(func=cmd_read_drift_result)
 
     return parser
 

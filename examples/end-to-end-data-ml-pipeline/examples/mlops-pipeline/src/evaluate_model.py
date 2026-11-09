@@ -25,6 +25,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import boto3
@@ -150,8 +151,67 @@ def run_batch_transform(sm, transform_job_name, model_name, inference_data_path,
     logger.info(f"Transform completed: {info['TransformOutput']['S3OutputPath']}")
 
 
-def compute_metrics(s3, test_data_path, eval_output_prefix):
-    """Read labels from test data and predictions from transform output, compute metrics."""
+def read_transform_scores(s3, eval_output_prefix):
+    """Read raw score lines from Batch Transform ``*.csv.out`` files."""
+    pred_parsed = urlparse(eval_output_prefix.rstrip("/"))
+    pred_bucket = pred_parsed.netloc
+    pred_prefix = pred_parsed.path.lstrip("/").rstrip("/") + "/"
+
+    pred_objects = s3.list_objects_v2(Bucket=pred_bucket, Prefix=pred_prefix)
+    pred_files = sorted(
+        obj["Key"] for obj in pred_objects.get("Contents", [])
+        if obj["Key"].endswith(".csv.out")
+    )
+
+    predictions = []
+    for key in pred_files:
+        body = s3.get_object(Bucket=pred_bucket, Key=key)["Body"].read().decode("utf-8")
+        for line in body.strip().split("\n"):
+            line = line.strip()
+            if line:
+                # First cell is the score (raw .out is a single value per line)
+                predictions.append(float(line.split(",")[0]))
+    return predictions, pred_files
+
+
+def write_enriched_predictions(
+    table_uri, scores, model_name, model_version, inference_timestamp
+):
+    """Append enriched scores to a Delta table (creates the table on first write).
+
+    ``table_uri`` is a stable S3 prefix (e.g. .../evaluation/predictions_enriched)
+    so successive evaluate / batch runs accumulate rows instead of overwriting.
+    """
+    try:
+        import subprocess
+
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q", "deltalake", "pandas"],
+            stdout=subprocess.DEVNULL,
+        )
+        import pandas as pd
+        from deltalake import write_deltalake
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not install/import deltalake for enriched predictions: {e}"
+        ) from e
+
+    df = pd.DataFrame(
+        {
+            "score": [float(s) for s in scores],
+            "model_name": [str(model_name)] * len(scores),
+            "model_version": [str(model_version)] * len(scores),
+            "inference_timestamp": [str(inference_timestamp)] * len(scores),
+        }
+    )
+    uri = table_uri.rstrip("/")
+    write_deltalake(uri, df, mode="append")
+    logger.info(f"Appended {len(scores)} enriched predictions to Delta table {uri}")
+    return uri
+
+
+def compute_metrics(s3, test_data_path, scores, pred_files=None):
+    """Read labels from test data and compute metrics against ``scores``."""
     from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 
     # Read test labels (first column of test CSV)
@@ -176,27 +236,8 @@ def compute_metrics(s3, test_data_path, eval_output_prefix):
             except ValueError:
                 continue
 
-    # Read predictions
-    pred_parsed = urlparse(eval_output_prefix.rstrip("/"))
-    pred_bucket = pred_parsed.netloc
-    pred_prefix = pred_parsed.path.lstrip("/").rstrip("/") + "/"
-
-    pred_objects = s3.list_objects_v2(Bucket=pred_bucket, Prefix=pred_prefix)
-    pred_files = sorted(
-        obj["Key"] for obj in pred_objects.get("Contents", [])
-        if obj["Key"].endswith(".csv.out")
-    )
-
-    predictions = []
-    for key in pred_files:
-        body = s3.get_object(Bucket=pred_bucket, Key=key)["Body"].read().decode("utf-8")
-        for line in body.strip().split("\n"):
-            line = line.strip()
-            if line:
-                predictions.append(float(line))
-
     y_true = np.array(labels)
-    y_prob = np.array(predictions)
+    y_prob = np.array(scores)
 
     logger.info(f"Labels count: {len(y_true)}, unique values: {np.unique(y_true)}")
     logger.info(f"Predictions count: {len(y_prob)}, range: [{y_prob.min():.4f}, {y_prob.max():.4f}]")
@@ -290,13 +331,31 @@ def main():
 
     run_batch_transform(sm, transform_job_name, model_name, inference_data_path, eval_output_prefix)
 
-    # Step 4: Compute metrics
-    metrics = compute_metrics(s3, args.test_data_path, eval_output_prefix)
+    # Step 4: Enrich raw transform scores with model identity + inference time
+    inference_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Pre-registry: training job name is the unique candidate version identifier.
+    model_version = training_job_name
+    scores, pred_files = read_transform_scores(s3, eval_output_prefix)
+    # Stable Delta path (not per-model) so runs append into one table.
+    enriched_table_uri = args.output_path.rstrip("/") + "/predictions_enriched"
+    enriched_uri = write_enriched_predictions(
+        enriched_table_uri,
+        scores,
+        model_name=model_name,
+        model_version=model_version,
+        inference_timestamp=inference_timestamp,
+    )
 
-    # Step 5: Save evaluation report to S3
+    # Step 5: Compute metrics
+    metrics = compute_metrics(s3, args.test_data_path, scores, pred_files=pred_files)
+
+    # Step 6: Save evaluation report to S3
     evaluation_report = {
         "training_job": training_job_name,
         "model_name": model_name,
+        "model_version": model_version,
+        "inference_timestamp": inference_timestamp,
+        "enriched_predictions_uri": enriched_uri,
         "model_data_url": model_data_url,
         "metrics": metrics,
     }
@@ -311,7 +370,7 @@ def main():
     )
     logger.info(f"Evaluation report saved to s3://{pred_parsed.netloc}/{report_key}")
 
-    # Step 6: Log to MLflow
+    # Step 7: Log to MLflow
     log_to_mlflow(
         args.tracking_server_arn, args.experiment_name,
         training_job_name, model_name, metrics,
@@ -323,6 +382,9 @@ def main():
     logger.info("=" * 60)
     logger.info(f"  Training Job:  {training_job_name}")
     logger.info(f"  Model:         {model_name}")
+    logger.info(f"  Version:       {model_version}")
+    logger.info(f"  Inferred at:   {inference_timestamp}")
+    logger.info(f"  Enriched Delta: {enriched_uri}")
     logger.info(f"  AUC:           {metrics['auc']:.4f}")
     logger.info(f"  Accuracy:      {metrics['accuracy']:.4f}")
     logger.info(f"  F1:            {metrics['f1']:.4f}")

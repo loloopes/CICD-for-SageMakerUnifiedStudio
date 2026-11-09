@@ -1,0 +1,36 @@
+# =============================================================================
+# Bank Mktg Drift Check Pipeline
+# =============================================================================
+# Compares current DataOps transformed data against the last training
+# reference snapshot. Writes result.json for the GitHub Actions train gate.
+# Does not train or deploy — always succeeds; the gate reads drift_detected.
+# =============================================================================
+
+drift_check_pipeline:
+  dag_id: drift_check_pipeline
+  schedule_interval: null
+  catchup: false
+  default_args:
+    retries: 0
+
+  tasks:
+    data_drift_check:
+      operator: airflow.providers.amazon.aws.operators.glue.GlueJobOperator
+      retries: 0
+      job_name: stack-data-drift
+      script_location: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/src/glue_data_drift_check.py"
+      s3_bucket: "{proj.connection.default.s3_shared.bucket_name}"
+      iam_role_name: "{proj.iam_role_name}"
+      region_name: "{domain.region}"
+      update_config: true
+      script_args:
+        "--CURRENT_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/data_pipeline/output/transformed/"
+        "--REFERENCE_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/data/bank_mktg/features/drift_reference/"
+        "--REPORT_PATH": "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/data/bank_mktg/drift_reports/{{ ts_nodash }}/"
+        "--PSI_THRESHOLD": "0.2"
+      create_job_kwargs:
+        GlueVersion: "4.0"
+        NumberOfWorkers: 2
+        WorkerType: "G.1X"
+        Timeout: 600
+        MaxRetries: 0

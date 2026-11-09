@@ -4,8 +4,8 @@ name: E2E MLOps Train
 # register). Registers a new model package version as PendingManualApproval.
 # Approve that version in the SageMaker Model Registry to start e2e-mlops-promote.
 #
-# Use after E2E Deploy MLOps (DAGs must already be deployed), or enable
-# run_training on E2E Deploy MLOps Pipeline to chain deploy → train.
+# Use after E2E Deploy MLOps (DAGs must already be deployed), or chain from
+# E2E Deploy MLOps Pipeline via check_drift (train if drift) / run_training (force).
 
 on:
   workflow_dispatch:

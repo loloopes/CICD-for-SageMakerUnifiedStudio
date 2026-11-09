@@ -6,7 +6,7 @@ End-to-end ML pipeline that trains an XGBoost binary classifier with SageMaker, 
 
 ## Architecture
 
-Two workflows make up the MLOps flow:
+Three workflows make up the MLOps flow:
 
 **`training_pipeline`** — trains and registers a model version:
 
@@ -23,13 +23,22 @@ preprocess (GlueJobOperator)
 deploy_model (SageMakerProcessingOperator → stack-prediction-<stage> endpoint)
 ```
 
+**`drift_check_pipeline`** — compares current DataOps data to the last training reference (dev gate):
+
+```text
+data_drift_check (GlueJobOperator → drift_reports/.../result.json)
+```
+
+On **E2E Deploy MLOps Pipeline** (`workflow_dispatch`), `check_drift` (default on) runs this DAG after deploy and only calls `training_pipeline` when `drift_detected=true`. Set `run_training` to force a retrain and skip the gate. Missing reference/result counts as drift so the first train can bootstrap. Each successful preprocess snapshots `transformed/` → `features/drift_reference/`.
+
 | Step | Operator | Description |
 | ---- | -------- | ----------- |
-| `preprocess` | GlueJobOperator | Feature engineering from the DataOps Athena table; train/val/test split |
+| `preprocess` | GlueJobOperator | Feature engineering from the DataOps Athena table; train/val/test split; writes `drift_reference/` |
 | `train_model` | SageMakerTrainingOperator | XGBoost training via `train_xgboost.py` (script mode) with MLflow tracking |
 | `evaluate_model` | SageMakerProcessingOperator | Batch evaluation on the held-out test set (`evaluate_model.py`) |
 | `register_model` | SageMakerRegisterModelVersionOperator | Registers a version in `stack-prediction-models` as `PendingManualApproval` |
 | `deploy_model` | SageMakerProcessingOperator | Creates/updates the prediction endpoint (`deploy_model.py`) |
+| `data_drift_check` | GlueJobOperator | PSI / categorical share-delta vs `drift_reference/`; writes `result.json` |
 
 Model **approval** drives deployment: approving a version fires EventBridge → Lambda → GitHub Actions → `deploy_pipeline`. See the [parent README](../../README.md#deploy-trigger-behavior) for details.
 
@@ -68,9 +77,11 @@ mlops-pipeline/
 ├── manifest.yaml                        # Deployment manifest (dev/test/prod stages)
 ├── workflows/
 │   ├── training_pipeline.yaml           # preprocess → train → evaluate → register
-│   └── deploy_pipeline.yaml             # deploy_model → endpoint (event-driven)
+│   ├── deploy_pipeline.yaml             # deploy_model → endpoint (event-driven)
+│   └── drift_check_pipeline.yaml        # data drift gate (dev / GHA)
 └── src/
-    ├── feature_engineering.py           # Glue preprocess job
+    ├── feature_engineering.py           # Glue preprocess job (+ drift_reference snapshot)
+    ├── glue_data_drift_check.py         # Glue PSI / share-delta drift check
     ├── train_xgboost.py                 # XGBoost training script (SageMaker script mode)
     ├── evaluate_model.py                # Batch evaluation processing script
     ├── deploy_model.py                  # Endpoint deploy processing script
