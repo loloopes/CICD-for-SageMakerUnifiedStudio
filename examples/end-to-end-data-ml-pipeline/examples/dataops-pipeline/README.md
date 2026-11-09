@@ -27,6 +27,10 @@ Account ID and domain are resolved at runtime, and the rest have defaults — se
 
 ## Deploy and Run
 
+**CI:** `E2E Deploy DataOps Pipeline` deploys this project and then runs `data_pipeline` automatically (so a changed `data/stack-sample.csv` refreshes `output/transformed/` for MLOps). Set `run_pipeline=false` on `workflow_dispatch` to deploy assets only.
+
+**Local CLI:**
+
 ```bash
 # Validate connectivity
 aws-smus-cicd-cli describe --manifest manifest.yaml --targets dev --connect

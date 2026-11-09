@@ -269,10 +269,11 @@ Because every stage uses the same OIDC role (`AWS_ROLE_ARN_DEV`), that role must
 
 #### 5. Deploy the DataOps pipeline (dev)
 
-DataOps must run first — it creates the `campaign_results` table the MLOps pipeline reads. Push to `main` (path-filtered) or trigger manually:
+DataOps must run first — it creates the `campaign_results` table the MLOps pipeline reads. Push to `main` (path-filtered) or trigger manually. After deploy, the workflow **automatically runs `data_pipeline`** so `transformed/` (and Athena) refresh for MLOps:
 
 ```bash
 gh workflow run e2e-dataops-pipeline.yml --ref main
+# optional: -f run_pipeline=false  # deploy assets only, skip the DAG
 ```
 
 #### 6. Deploy the MLOps training pipeline
@@ -306,7 +307,7 @@ These GitHub Actions workflows (at the repository root) are this example's own e
 
 | Workflow | File | Purpose |
 | -------- | ---- | ------- |
-| DataOps | [`e2e-dataops-pipeline.yml`](../../.github/workflows/e2e-dataops-pipeline.yml) | Deploy and run the data pipeline |
+| DataOps | [`e2e-dataops-pipeline.yml`](../../.github/workflows/e2e-dataops-pipeline.yml) | Deploy DataOps assets, then run `data_pipeline` (refresh transformed/ for MLOps) |
 | MLOps Training | [`e2e-mlops-pipeline.yml`](../../.github/workflows/e2e-mlops-pipeline.yml) | Deploy training pipeline + provision MLOps infra (dev) |
 | MLOps Promote | [`e2e-mlops-promote.yml`](../../.github/workflows/e2e-mlops-promote.yml) | Event-driven dev → test → prod promote cascade on model approval |
 

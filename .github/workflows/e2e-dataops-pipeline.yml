@@ -11,6 +11,12 @@ on:
       - '.github/workflows/smus-direct-deploy.yml'
       - '.github/workflows/e2e-dataops-pipeline.yml'
   workflow_dispatch:
+    inputs:
+      run_pipeline:
+        description: "After deploy, run data_pipeline (refresh transformed/ for MLOps)"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   id-token: write
@@ -19,6 +25,9 @@ permissions:
 # Single source of truth for the deploy environment name.
 env:
   DEV_ENVIRONMENT: dev-aws-account
+  DEV_ROLE_SECRET: AWS_ROLE_ARN_DEV
+  MANIFEST_DIR: examples/end-to-end-data-ml-pipeline/examples/dataops-pipeline
+  WORKFLOW_NAME: data_pipeline
 
 jobs:
   # Exposes the env value as a job output, since `with:` can't read the workflow
@@ -27,9 +36,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       dev_environment: ${{ steps.vars.outputs.dev_environment }}
+      dev_role_secret: ${{ steps.vars.outputs.dev_role_secret }}
     steps:
       - id: vars
-        run: echo "dev_environment=$DEV_ENVIRONMENT" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "dev_environment=$DEV_ENVIRONMENT" >> "$GITHUB_OUTPUT"
+          echo "dev_role_secret=$DEV_ROLE_SECRET" >> "$GITHUB_OUTPUT"
 
   deploy:
     # Uses the shared reusable. The dev OIDC role (AWS_ROLE_ARN_DEV) is mapped
@@ -45,3 +57,60 @@ jobs:
       target: 'dev'
       environment_name: ${{ needs.resolve-config.outputs.dev_environment }}
       skip_tests: true
+
+  # Refresh staging/transformed/Athena so MLOps preprocess + drift see the new source.
+  # Runs on push (e.g. CSV change) and on workflow_dispatch unless run_pipeline=false.
+  run-data-pipeline:
+    name: Run data_pipeline (dev)
+    needs: [resolve-config, deploy]
+    if: >-
+      always()
+      && needs.deploy.result == 'success'
+      && (github.event_name != 'workflow_dispatch' || inputs.run_pipeline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: ${{ needs.resolve-config.outputs.dev_environment }}
+    env:
+      STAGE: dev
+      DEV_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
+      TEST_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
+      PROD_DOMAIN_REGION: ${{ vars.DOMAIN_REGION }}
+      DEV_PROJECT_NAME: ${{ vars.DEV_PROJECT_NAME || 'e2e-data-stack-ml-ops-dev' }}
+      DOMAIN_TAG_PURPOSE: ${{ vars.DOMAIN_TAG_PURPOSE }}
+      PROJECT_OWNER_ARN: ${{ secrets.PROJECT_OWNER_ARN || 'arn:aws:iam:::user/lopes@stacktecnologias.com.br' }}
+      ATHENA_DB_NAME: ${{ vars.ATHENA_DB_NAME || 'stack_bank_mktg_dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Authenticate via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets[needs.resolve-config.outputs.dev_role_secret] }}
+          aws-region: ${{ vars.DOMAIN_REGION || 'us-east-1' }}
+          role-session-name: smus-dataops-run-session
+
+      - name: Install CLI
+        # Install from this checkout so monitor --live failure exit codes apply.
+        run: pip install -e . -q
+
+      - name: Run data_pipeline DAG
+        working-directory: ${{ env.MANIFEST_DIR }}
+        # monitor --live exits 1 if the DAG run transitions to FAILED/STOPPED/CANCELLED.
+        run: |
+          set -euo pipefail
+          aws-smus-cicd-cli run --manifest manifest.yaml --targets "$STAGE" --workflow "$WORKFLOW_NAME"
+          aws-smus-cicd-cli monitor --manifest manifest.yaml --targets "$STAGE" --live
+
+      - name: Summary
+        run: |
+          {
+            echo "### DataOps data_pipeline"
+            echo ""
+            echo "Refreshed \`transformed/\` (and Athena) in **dev** so MLOps train/drift can read the latest source."
+            echo ""
+            echo "Next: run **E2E Deploy MLOps Pipeline** with \`check_drift\` (or wait for scheduled train) if you want retrain."
+          } >> "$GITHUB_STEP_SUMMARY"
