@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """One-shot SageMaker Batch Transform smoke test.
 
-Creates an ephemeral Model from the latest completed training job, strips the
-label column from a features split (train/validation/test), runs Batch
-Transform, then writes an enriched CSV with:
+Scores a features split with the **same model currently serving** a realtime
+endpoint (dev / test / prod). Creates an ephemeral Batch Model from that
+endpoint's image + ModelDataUrl (plain XGBoost — no realtime inference.py),
+writes enriched CSV, then deletes the ephemeral Model.
 
-    score, features, model_name, model_version, inference_timestamp
-
-Deletes the ephemeral Model when finished.
-
-Example (e2e-data-stack-ml-ops-dev)::
+Example::
 
     python examples/end-to-end-data-ml-pipeline/scripts/batch_inference_smoke.py \\
-      --shared-s3-uri s3://amazon-sagemaker-442460399726-us-east-2-a1501210c441/dzd-5e6vtm4oytol49/6d3pq5vm70uxm1/shared \\
+      --shared-s3-uri s3://…/shared \\
       --region us-east-2 \\
-      --role-arn arn:aws:iam::442460399726:role/datazone_usr_role_6d3pq5vm70uxm1_cac5ixjkrb173d \\
-      --split train
+      --role-arn arn:aws:iam::ACCOUNT:role/datazone_usr_role_… \\
+      --endpoint-name stack-prediction-test \\
+      --split validation
 """
 
 from __future__ import annotations
@@ -38,6 +36,12 @@ logger = logging.getLogger("batch_inference_smoke")
 DEFAULT_IMAGE = {
     "us-east-1": "257758044811.dkr.ecr.us-east-1.amazonaws.com/sagemaker-xgboost:1.7-1",
     "us-east-2": "257758044811.dkr.ecr.us-east-2.amazonaws.com/sagemaker-xgboost:1.7-1",
+}
+
+STAGE_ENDPOINTS = {
+    "dev": "stack-prediction-dev",
+    "test": "stack-prediction-test",
+    "prod": "stack-prediction-prod",
 }
 
 
@@ -85,40 +89,63 @@ def _list_keys(s3, bucket: str, prefix: str) -> list[str]:
     return keys
 
 
-def _latest_training_job(sm, prefix: str) -> tuple[str, str]:
-    resp = sm.list_training_jobs(SortBy="CreationTime", SortOrder="Descending", MaxResults=25)
-    matched = [
-        j
-        for j in resp["TrainingJobSummaries"]
-        if j["TrainingJobName"].startswith(prefix) and j["TrainingJobStatus"] == "Completed"
-    ]
-    if not matched:
-        raise SystemExit(f"No completed training jobs with prefix {prefix!r}")
-    name = matched[0]["TrainingJobName"]
-    info = sm.describe_training_job(TrainingJobName=name)
-    return name, info["ModelArtifacts"]["S3ModelArtifacts"]
+def _resolve_endpoint_serving(
+    sm, endpoint_name: str, fallback_image: str
+) -> tuple[str, str, str, str, str, str]:
+    """Return endpoint serving details for Batch Transform.
 
+    ``(sm_model_name, model_data_url, image_uri, display_name, display_version,
+    execution_role_arn)``
+    """
+    ep = sm.describe_endpoint(EndpointName=endpoint_name)
+    status = ep.get("EndpointStatus")
+    if status != "InService":
+        raise SystemExit(f"Endpoint {endpoint_name} is not InService (status={status})")
 
-def _resolve_model_identity(
-    sm, package_group: str, training_job: str
-) -> tuple[str, str]:
-    """Prefer latest Approved registry version; else use training job as version."""
-    model_name = package_group or "stack-prediction-models"
-    try:
-        resp = sm.list_model_packages(
-            ModelPackageGroupName=package_group,
-            ModelApprovalStatus="Approved",
-            SortBy="CreationTime",
-            SortOrder="Descending",
-            MaxResults=1,
+    cfg = sm.describe_endpoint_config(EndpointConfigName=ep["EndpointConfigName"])
+    sm_model_name = cfg["ProductionVariants"][0]["ModelName"]
+    model = sm.describe_model(ModelName=sm_model_name)
+    execution_role_arn = model.get("ExecutionRoleArn") or ""
+
+    containers = []
+    if model.get("PrimaryContainer"):
+        containers.append(model["PrimaryContainer"])
+    containers.extend(model.get("Containers") or [])
+    if not containers:
+        raise SystemExit(f"Model {sm_model_name} has no containers")
+
+    primary = containers[0]
+    model_data_url = primary.get("ModelDataUrl") or ""
+    image_uri = primary.get("Image") or fallback_image
+    env = primary.get("Environment") or {}
+
+    display_name = env.get("MODEL_NAME") or sm_model_name
+    display_version = env.get("MODEL_VERSION") or "unknown"
+
+    pkg_arn = primary.get("ModelPackageName")
+    if pkg_arn:
+        details = sm.describe_model_package(ModelPackageName=pkg_arn)
+        display_name = details.get("ModelPackageGroupName") or display_name
+        display_version = str(details.get("ModelPackageVersion") or display_version)
+        containers_pkg = details.get("InferenceSpecification", {}).get("Containers") or []
+        if not model_data_url and containers_pkg:
+            model_data_url = containers_pkg[0].get("ModelDataUrl") or ""
+            image_uri = containers_pkg[0].get("Image") or image_uri
+
+    if not model_data_url:
+        raise SystemExit(
+            f"Could not resolve ModelDataUrl from endpoint {endpoint_name} "
+            f"(model {sm_model_name})"
         )
-        pkgs = resp.get("ModelPackageSummaryList") or []
-        if pkgs:
-            version = str(pkgs[0].get("ModelPackageVersion") or training_job)
-            return model_name, version
-    except sm.exceptions.ClientError as e:
-        logger.warning("Could not resolve registry version (%s); using training job", e)
-    return model_name, training_job
+
+    return (
+        sm_model_name,
+        model_data_url,
+        image_uri,
+        display_name,
+        display_version,
+        execution_role_arn,
+    )
 
 
 def _delete_model(sm, name: str) -> None:
@@ -164,7 +191,6 @@ def _write_enriched_csv(
         ["score", "features", "model_name", "model_version", "inference_timestamp"]
     )
     for score, feats in zip(scores, feature_rows):
-        # Named map matches realtime inference.py / evaluate_model enrichment.
         named = {f"f{i}": float(v) for i, v in enumerate(feats)}
         writer.writerow(
             [
@@ -177,8 +203,7 @@ def _write_enriched_csv(
         )
 
     key = out_prefix.rstrip("/") + "/enriched_predictions.csv"
-    body = buf.getvalue()
-    s3.put_object(Bucket=out_bucket, Key=key, Body=body, ContentType="text/csv")
+    s3.put_object(Bucket=out_bucket, Key=key, Body=buf.getvalue(), ContentType="text/csv")
     return f"s3://{out_bucket}/{key}"
 
 
@@ -187,57 +212,85 @@ def main() -> int:
     parser.add_argument(
         "--shared-s3-uri",
         required=True,
-        help="Project shared root, e.g. s3://…/shared (no trailing stack/... needed)",
+        help="Project shared root for staging + output (usually the stage project)",
+    )
+    parser.add_argument(
+        "--features-shared-s3-uri",
+        default="",
+        help="Optional shared root for feature CSVs (default: --shared-s3-uri). "
+        "Use DEV shared when scoring test/prod endpoints.",
     )
     parser.add_argument("--region", required=True)
     parser.add_argument("--role-arn", required=True, help="SageMaker / project execution role ARN")
+    parser.add_argument(
+        "--stage",
+        choices=["dev", "test", "prod"],
+        default="",
+        help="Maps to endpoint stack-prediction-{stage} (alternative to --endpoint-name)",
+    )
+    parser.add_argument(
+        "--endpoint-name",
+        default="",
+        help="Realtime endpoint whose deployed model to score with "
+        "(default: stack-prediction-{stage})",
+    )
     parser.add_argument(
         "--split",
         default="train",
         choices=["train", "validation", "test"],
         help="Which features/ split to score (default: train)",
     )
-    parser.add_argument("--training-job-prefix", default="stack-xgb")
-    parser.add_argument(
-        "--model-package-group",
-        default="stack-prediction-models",
-        help="Registry group used for model_name / model_version (default: stack-prediction-models)",
-    )
-    parser.add_argument("--image-uri", default="", help="Defaults to region XGBoost 1.7-1 image")
+    parser.add_argument("--image-uri", default="", help="Fallback image if endpoint has none")
     parser.add_argument(
         "--max-rows",
         type=int,
         default=500,
-        help="Optional cap on rows sent to Batch Transform (0 = all). Default 500 for a quick smoke.",
+        help="Optional cap on rows sent to Batch Transform (0 = all). Default 500.",
     )
     args = parser.parse_args()
 
-    image_uri = args.image_uri or DEFAULT_IMAGE.get(args.region)
-    if not image_uri:
-        raise SystemExit(f"Pass --image-uri for region {args.region}")
+    endpoint_name = args.endpoint_name or (
+        STAGE_ENDPOINTS[args.stage] if args.stage else ""
+    )
+    if not endpoint_name:
+        raise SystemExit("Pass --stage {dev,test,prod} or --endpoint-name")
 
+    fallback_image = args.image_uri or DEFAULT_IMAGE.get(args.region, "")
     shared = args.shared_s3_uri.rstrip("/")
-    input_uri = f"{shared}/stack/mlops_pipeline/data/bank_mktg/features/{args.split}/"
+    features_shared = (args.features_shared_s3_uri or args.shared_s3_uri).rstrip("/")
+    input_uri = f"{features_shared}/stack/mlops_pipeline/data/bank_mktg/features/{args.split}/"
     output_uri = f"{shared}/stack/mlops_pipeline/models/evaluation/batch_smoke/"
 
     sm = boto3.client("sagemaker", region_name=args.region)
     s3 = boto3.client("s3", region_name=args.region)
 
-    training_job, model_data_url = _latest_training_job(sm, args.training_job_prefix)
-    registry_name, registry_version = _resolve_model_identity(
-        sm, args.model_package_group, training_job
-    )
-    logger.info("Training job : %s", training_job)
+    (
+        sm_model_name,
+        model_data_url,
+        image_uri,
+        display_name,
+        display_version,
+        endpoint_role_arn,
+    ) = _resolve_endpoint_serving(sm, endpoint_name, fallback_image)
+    # Prefer the endpoint model's role so Batch Transform can read the same
+    # ModelDataUrl the realtime endpoint uses (esp. test/prod staged artifacts).
+    create_role_arn = endpoint_role_arn or args.role_arn
+
+    logger.info("Endpoint     : %s", endpoint_name)
+    logger.info("SM Model     : %s", sm_model_name)
     logger.info("Model artifact: %s", model_data_url)
-    logger.info("Model name   : %s", registry_name)
-    logger.info("Model version: %s", registry_version)
+    logger.info("Image        : %s", image_uri)
+    logger.info("Model name   : %s", display_name)
+    logger.info("Model version: %s", display_version)
+    logger.info("Create role  : %s", create_role_arn)
     logger.info("Input split  : %s", input_uri)
+    logger.info("Output root  : %s", output_uri)
 
     in_bucket, in_prefix = _parse_s3(input_uri)
     csv_keys = _list_csv_keys(s3, in_bucket, in_prefix)
     if not csv_keys:
         logger.error("No CSV files under %s", input_uri)
-        logger.error("Run training_pipeline preprocess first, or fix --shared-s3-uri.")
+        logger.error("Run training_pipeline preprocess on DEV, or fix --features-shared-s3-uri.")
         return 1
     logger.info("Found %d CSV file(s) under split", len(csv_keys))
 
@@ -245,17 +298,24 @@ def main() -> int:
     ephemeral_model = f"stack-batch-smoke-{ts}"
     transform_name = f"stack-batch-smoke-{ts}"
 
+    # Ephemeral Batch Model: same weights as the endpoint, but without
+    # SAGEMAKER_PROGRAM=inference.py so XGBoost Batch Transform scores CSV lines.
     _delete_model(sm, ephemeral_model)
     sm.create_model(
         ModelName=ephemeral_model,
         PrimaryContainer={"Image": image_uri, "ModelDataUrl": model_data_url},
-        ExecutionRoleArn=args.role_arn,
+        ExecutionRoleArn=create_role_arn,
     )
-    logger.info("Created model %s", ephemeral_model)
+    logger.info("Created ephemeral batch model %s", ephemeral_model)
 
-    infer_prefix = f"{in_prefix.rstrip('/').rsplit('/', 1)[0]}/inference/{ephemeral_model}/"
-    for key in _list_keys(s3, in_bucket, infer_prefix):
-        s3.delete_object(Bucket=in_bucket, Key=key)
+    # Stage feature-only CSVs under the *output* project's shared prefix so the
+    # stage execution role can always read them (even when features live on DEV).
+    out_bucket, out_root_prefix = _parse_s3(output_uri)
+    infer_prefix = (
+        f"{out_root_prefix.rstrip('/')}/_input/{ephemeral_model}/"
+    )
+    for key in _list_keys(s3, out_bucket, infer_prefix):
+        s3.delete_object(Bucket=out_bucket, Key=key)
 
     feature_rows: list[list[str]] = []
     for key in csv_keys:
@@ -273,7 +333,7 @@ def main() -> int:
                 break
         dest = infer_prefix + key.rsplit("/", 1)[-1]
         s3.put_object(
-            Bucket=in_bucket,
+            Bucket=out_bucket,
             Key=dest,
             Body="\n".join(feat_lines) + ("\n" if feat_lines else ""),
             ContentType="text/csv",
@@ -287,9 +347,9 @@ def main() -> int:
         _delete_model(sm, ephemeral_model)
         return 1
 
-    infer_uri = f"s3://{in_bucket}/{infer_prefix}"
+    infer_uri = f"s3://{out_bucket}/{infer_prefix}"
     out_uri = f"{output_uri.rstrip('/')}/{ephemeral_model}/"
-    out_bucket, out_prefix = _parse_s3(out_uri)
+    _, out_prefix = _parse_s3(out_uri)
     logger.info("Batch Transform input : %s", infer_uri)
     logger.info("Batch Transform output: %s", out_uri)
 
@@ -327,8 +387,8 @@ def main() -> int:
             out_prefix,
             scores,
             feature_rows,
-            model_name=registry_name,
-            model_version=registry_version,
+            model_name=display_name,
+            model_version=display_version,
             inference_timestamp=inference_timestamp,
         )
 
@@ -339,7 +399,6 @@ def main() -> int:
         )
         logger.info("Rows: %d", len(scores))
 
-        # Preview first few enriched lines
         preview = s3.get_object(
             Bucket=out_bucket, Key=out_prefix.rstrip("/") + "/enriched_predictions.csv"
         )["Body"].read().decode("utf-8")

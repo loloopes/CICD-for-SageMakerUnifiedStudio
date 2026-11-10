@@ -177,35 +177,61 @@ aws iam put-role-policy \
   --policy-document "$MLOPS_INFRA_POLICY"
 echo "  Applied."
 
-# ── Step 4: Project role trust policy ────────────────────────────────────────
-echo "Step 4: Updating $DEPLOYMENT_ROLE trust policy..."
+# ── Step 4: Trust this OIDC role on deployment + optional DataZone user roles ─
+# Batch inference / role-chaining needs the target role's trust policy to allow
+# GitHubActionsRole-*. setup only updated DEPLOYMENT_ROLE before; DataZone
+# project user roles (datazone_usr_role_*) must trust OIDC too.
+echo "Step 4: Updating trust policies to allow $ROLE_NAME..."
 
 # Wait for IAM role propagation before referencing it in another policy
 echo "  Waiting for IAM role propagation..."
 sleep 10
 
-# Find the actual role (may be under service-role/ path)
-ACTUAL_DEPLOYMENT_ROLE_ARN=$(aws iam get-role --role-name "$DEPLOYMENT_ROLE" \
-  --query 'Role.Arn' --output text 2>/dev/null || echo "")
-
-if [ -n "$ACTUAL_DEPLOYMENT_ROLE_ARN" ]; then
-  EXISTING_TRUST=$(aws iam get-role --role-name "$DEPLOYMENT_ROLE" \
-    --query 'Role.AssumeRolePolicyDocument' --output json)
-
-  if echo "$EXISTING_TRUST" | grep -q "$ROLE_NAME"; then
-    echo "  $ROLE_NAME already trusted."
-  else
-    UPDATED_TRUST=$(echo "$EXISTING_TRUST" | jq \
-      --arg arn "$ROLE_ARN" \
-      '.Statement += [{"Effect":"Allow","Principal":{"AWS":$arn},"Action":"sts:AssumeRole"}]')
-    aws iam update-assume-role-policy \
-      --role-name "$DEPLOYMENT_ROLE" \
-      --policy-document "$UPDATED_TRUST"
-    echo "  Added $ROLE_NAME as trusted principal."
+add_oidc_trust() {
+  local target_role="$1"
+  if ! aws iam get-role --role-name "$target_role" &>/dev/null; then
+    echo "  WARNING: role $target_role not found — skip"
+    return 0
   fi
+  local existing updated
+  existing=$(aws iam get-role --role-name "$target_role" \
+    --query 'Role.AssumeRolePolicyDocument' --output json)
+  if echo "$existing" | grep -q "$ROLE_NAME"; then
+    echo "  $target_role already trusts $ROLE_NAME"
+    return 0
+  fi
+  updated=$(echo "$existing" | jq \
+    --arg arn "$ROLE_ARN" \
+    '.Statement += [{"Effect":"Allow","Principal":{"AWS":$arn},"Action":["sts:AssumeRole","sts:TagSession"]}]')
+  aws iam update-assume-role-policy \
+    --role-name "$target_role" \
+    --policy-document "$updated"
+  echo "  Added $ROLE_NAME as trusted principal on $target_role"
+}
+
+add_oidc_trust "$DEPLOYMENT_ROLE"
+
+# Optional: comma-separated DataZone user role names (or leave unset to discover).
+# Example:
+#   DATAZONE_USER_ROLES=datazone_usr_role_xxx_yyy ./setup-github-oidc.sh ...
+if [[ -n "${DATAZONE_USER_ROLES:-}" ]]; then
+  IFS=',' read -ra DZ_ROLES <<< "$DATAZONE_USER_ROLES"
+  for dz in "${DZ_ROLES[@]}"; do
+    dz_trimmed="$(echo "$dz" | xargs)"
+    [[ -n "$dz_trimmed" ]] && add_oidc_trust "$dz_trimmed"
+  done
 else
-  echo "  WARNING: $DEPLOYMENT_ROLE not found. You may need to manually add"
-  echo "  $ROLE_ARN as a trusted principal in the deployment role's trust policy."
+  echo "  Discovering datazone_usr_role_* roles in account..."
+  mapfile -t DZ_DISCOVERED < <(aws iam list-roles \
+    --query "Roles[?starts_with(RoleName, 'datazone_usr_role_')].RoleName" \
+    --output text | tr '\t' '\n' | sed '/^$/d')
+  if ((${#DZ_DISCOVERED[@]} == 0)); then
+    echo "  No datazone_usr_role_* found. Set DATAZONE_USER_ROLES if batch role-chaining is needed."
+  else
+    for dz in "${DZ_DISCOVERED[@]}"; do
+      add_oidc_trust "$dz"
+    done
+  fi
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
