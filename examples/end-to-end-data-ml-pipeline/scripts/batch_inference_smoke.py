@@ -26,6 +26,7 @@ import logging
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 
 import boto3
@@ -220,6 +221,12 @@ def main() -> int:
         help="Optional shared root for feature CSVs (default: --shared-s3-uri). "
         "Use DEV shared when scoring test/prod endpoints.",
     )
+    parser.add_argument(
+        "--features-local-dir",
+        default="",
+        help="Optional local directory of feature CSVs (skips S3 GetObject on the "
+        "features prefix). Used when the stage role cannot read DEV shared.",
+    )
     parser.add_argument("--region", required=True)
     parser.add_argument("--role-arn", required=True, help="SageMaker / project execution role ARN")
     parser.add_argument(
@@ -260,6 +267,7 @@ def main() -> int:
     features_shared = (args.features_shared_s3_uri or args.shared_s3_uri).rstrip("/")
     input_uri = f"{features_shared}/stack/mlops_pipeline/data/bank_mktg/features/{args.split}/"
     output_uri = f"{shared}/stack/mlops_pipeline/models/evaluation/batch_smoke/"
+    local_dir = Path(args.features_local_dir) if args.features_local_dir else None
 
     sm = boto3.client("sagemaker", region_name=args.region)
     s3 = boto3.client("s3", region_name=args.region)
@@ -283,16 +291,35 @@ def main() -> int:
     logger.info("Model name   : %s", display_name)
     logger.info("Model version: %s", display_version)
     logger.info("Create role  : %s", create_role_arn)
-    logger.info("Input split  : %s", input_uri)
+    logger.info("Input split  : %s", input_uri if not local_dir else f"local:{local_dir}")
     logger.info("Output root  : %s", output_uri)
 
-    in_bucket, in_prefix = _parse_s3(input_uri)
-    csv_keys = _list_csv_keys(s3, in_bucket, in_prefix)
-    if not csv_keys:
-        logger.error("No CSV files under %s", input_uri)
-        logger.error("Run training_pipeline preprocess on DEV, or fix --features-shared-s3-uri.")
-        return 1
-    logger.info("Found %d CSV file(s) under split", len(csv_keys))
+    # Collect (filename, raw csv text) either from local prefetch or S3.
+    csv_payloads: list[tuple[str, str]] = []
+    if local_dir:
+        if not local_dir.is_dir():
+            raise SystemExit(f"--features-local-dir not a directory: {local_dir}")
+        local_csvs = sorted(p for p in local_dir.iterdir() if p.suffix == ".csv")
+        if not local_csvs:
+            logger.error("No CSV files under %s", local_dir)
+            return 1
+        for path in local_csvs:
+            csv_payloads.append((path.name, path.read_text(encoding="utf-8")))
+        logger.info("Found %d local CSV file(s)", len(csv_payloads))
+    else:
+        in_bucket, in_prefix = _parse_s3(input_uri)
+        csv_keys = _list_csv_keys(s3, in_bucket, in_prefix)
+        if not csv_keys:
+            logger.error("No CSV files under %s", input_uri)
+            logger.error(
+                "Run training_pipeline preprocess on DEV, or fix --features-shared-s3-uri "
+                "/ --features-local-dir."
+            )
+            return 1
+        for key in csv_keys:
+            body = s3.get_object(Bucket=in_bucket, Key=key)["Body"].read().decode("utf-8")
+            csv_payloads.append((key.rsplit("/", 1)[-1], body))
+        logger.info("Found %d CSV file(s) under split", len(csv_payloads))
 
     ts = int(time.time())
     ephemeral_model = f"stack-batch-smoke-{ts}"
@@ -311,15 +338,12 @@ def main() -> int:
     # Stage feature-only CSVs under the *output* project's shared prefix so the
     # stage execution role can always read them (even when features live on DEV).
     out_bucket, out_root_prefix = _parse_s3(output_uri)
-    infer_prefix = (
-        f"{out_root_prefix.rstrip('/')}/_input/{ephemeral_model}/"
-    )
+    infer_prefix = f"{out_root_prefix.rstrip('/')}/_input/{ephemeral_model}/"
     for key in _list_keys(s3, out_bucket, infer_prefix):
         s3.delete_object(Bucket=out_bucket, Key=key)
 
     feature_rows: list[list[str]] = []
-    for key in csv_keys:
-        body = s3.get_object(Bucket=in_bucket, Key=key)["Body"].read().decode("utf-8")
+    for filename, body in csv_payloads:
         lines = [ln for ln in body.strip().split("\n") if ln.strip()]
         feat_lines: list[str] = []
         for ln in lines:
@@ -331,7 +355,7 @@ def main() -> int:
             feat_lines.append(",".join(feats))
             if args.max_rows and len(feature_rows) >= args.max_rows:
                 break
-        dest = infer_prefix + key.rsplit("/", 1)[-1]
+        dest = infer_prefix + filename
         s3.put_object(
             Bucket=out_bucket,
             Key=dest,

@@ -174,25 +174,58 @@ jobs:
           SHARED_S3_URI="$(awk -F= '/^shared_s3_uri=/{print substr($0,index($0,"=")+1)}' "$STAGE_OUT")"
           PROJECT_ROLE_ARN="$(awk -F= '/^project_role_arn=/{print substr($0,index($0,"=")+1)}' "$STAGE_OUT")"
 
+          DEV_ROLE_ARN=""
           if [ -n "${FEATURES_SHARED_OVERRIDE:-}" ]; then
             FEATURES_SHARED_S3_URI="$FEATURES_SHARED_OVERRIDE"
           elif [ "$PROJECT_NAME" = "$DEV_PROJECT" ]; then
             FEATURES_SHARED_S3_URI="$SHARED_S3_URI"
+            DEV_ROLE_ARN="$PROJECT_ROLE_ARN"
           else
             DEV_OUT="$(mktemp)"
             resolve_ctx "$DEV_PROJECT" "$DEV_OUT"
             FEATURES_SHARED_S3_URI="$(awk -F= '/^shared_s3_uri=/{print substr($0,index($0,"=")+1)}' "$DEV_OUT")"
+            DEV_ROLE_ARN="$(awk -F= '/^project_role_arn=/{print substr($0,index($0,"=")+1)}' "$DEV_OUT")"
           fi
 
           {
             echo "shared_s3_uri=${SHARED_S3_URI}"
             echo "project_role_arn=${PROJECT_ROLE_ARN}"
             echo "features_shared_s3_uri=${FEATURES_SHARED_S3_URI}"
+            echo "dev_project_role_arn=${DEV_ROLE_ARN}"
           } >> "$GITHUB_OUTPUT"
 
           echo "Stage shared : $SHARED_S3_URI"
           echo "Features from: $FEATURES_SHARED_S3_URI"
           echo "Project role : $PROJECT_ROLE_ARN"
+          echo "DEV role     : $DEV_ROLE_ARN"
+
+      # Stage roles cannot read DEV project prefixes. Prefetch CSVs onto the
+      # runner with a short-lived DEV assume-role (does not replace job creds).
+      - name: Prefetch DEV features onto runner
+        if: needs.resolve-config.outputs.stage != 'dev'
+        env:
+          DEV_ROLE_ARN: ${{ steps.ctx.outputs.dev_project_role_arn }}
+          FEATURES_SHARED_S3_URI: ${{ steps.ctx.outputs.features_shared_s3_uri }}
+          SPLIT: ${{ needs.resolve-config.outputs.split }}
+          REGION: ${{ vars.DOMAIN_REGION || 'us-east-2' }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/batch-features
+          CREDS=$(aws sts assume-role \
+            --role-arn "$DEV_ROLE_ARN" \
+            --role-session-name smus-batch-prefetch \
+            --query 'Credentials' --output json)
+          export AWS_ACCESS_KEY_ID
+          export AWS_SECRET_ACCESS_KEY
+          export AWS_SESSION_TOKEN
+          AWS_ACCESS_KEY_ID=$(jq -r .AccessKeyId <<<"$CREDS")
+          AWS_SECRET_ACCESS_KEY=$(jq -r .SecretAccessKey <<<"$CREDS")
+          AWS_SESSION_TOKEN=$(jq -r .SessionToken <<<"$CREDS")
+          SRC="${FEATURES_SHARED_S3_URI%/}/stack/mlops_pipeline/data/bank_mktg/features/${SPLIT}/"
+          echo "Syncing $SRC -> /tmp/batch-features/"
+          aws s3 sync "$SRC" /tmp/batch-features/ --region "$REGION"
+          ls -la /tmp/batch-features/
+          test -n "$(find /tmp/batch-features -name '*.csv' | head -1)"
 
       - name: Assume project execution role
         uses: aws-actions/configure-aws-credentials@v4
@@ -217,15 +250,21 @@ jobs:
           MAX_ROWS: ${{ needs.resolve-config.outputs.max_rows }}
         run: |
           set -euo pipefail
+          EXTRA=()
+          if [ "$STAGE" != "dev" ]; then
+            EXTRA+=(--features-local-dir /tmp/batch-features)
+          else
+            EXTRA+=(--features-shared-s3-uri "$FEATURES_SHARED_S3_URI")
+          fi
           python3 examples/end-to-end-data-ml-pipeline/scripts/batch_inference_smoke.py \
             --shared-s3-uri "$SHARED_S3_URI" \
-            --features-shared-s3-uri "$FEATURES_SHARED_S3_URI" \
             --region "$REGION" \
             --role-arn "$PROJECT_ROLE_ARN" \
             --endpoint-name "$ENDPOINT_NAME" \
             --stage "$STAGE" \
             --split "$SPLIT" \
-            --max-rows "$MAX_ROWS"
+            --max-rows "$MAX_ROWS" \
+            "${EXTRA[@]}"
 
       - name: Summary
         if: always()
