@@ -71,6 +71,13 @@ jobs:
       prod_role_secret: ${{ steps.vars.outputs.prod_role_secret }}
     steps:
       - id: vars
+        env:
+          # Surface dispatch inputs so skipped drift/train is debuggable in the summary.
+          INPUT_STAGES: ${{ inputs.stages }}
+          INPUT_SETUP_INFRA: ${{ inputs.setup_infra }}
+          INPUT_CHECK_DRIFT: ${{ inputs.check_drift }}
+          INPUT_RUN_TRAINING: ${{ inputs.run_training }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           echo "dev_environment=$DEV_ENVIRONMENT" >> "$GITHUB_OUTPUT"
           echo "test_environment=$TEST_ENVIRONMENT" >> "$GITHUB_OUTPUT"
@@ -81,12 +88,33 @@ jobs:
           echo "dev_role_secret=$DEV_ROLE_SECRET" >> "$GITHUB_OUTPUT"
           echo "test_role_secret=$TEST_ROLE_SECRET" >> "$GITHUB_OUTPUT"
           echo "prod_role_secret=$PROD_ROLE_SECRET" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Workflow inputs"
+            echo ""
+            echo "- **event**: \`$EVENT_NAME\`"
+            echo "- **stages**: \`${INPUT_STAGES:-}\`"
+            echo "- **setup_infra**: \`${INPUT_SETUP_INFRA:-}\`"
+            echo "- **check_drift**: \`${INPUT_CHECK_DRIFT:-}\`"
+            echo "- **run_training**: \`${INPUT_RUN_TRAINING:-}\`"
+            echo ""
+            if [ "$EVENT_NAME" = "workflow_dispatch" ] && { [ "$INPUT_CHECK_DRIFT" = "true" ] || [ "$INPUT_CHECK_DRIFT" = "True" ]; }; then
+              echo "Drift check **will run** after deploy succeeds."
+            elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "Drift check **will be skipped** (\`check_drift\` is not true)."
+            else
+              echo "Drift check runs only on \`workflow_dispatch\` (this event: \`$EVENT_NAME\`)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Provision the deploy trigger (EventBridge + Lambda) once, in dev.
   setup-infra:
     name: Setup ML Training Pipeline Infrastructure (dev)
     needs: [resolve-config]
-    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.setup_infra) && (inputs.stages == '' || inputs.stages == 'all' || inputs.stages == 'dev') }}
+    if: >-
+      (github.event_name != 'workflow_dispatch'
+       || inputs.setup_infra == true
+       || inputs.setup_infra == 'true')
+      && (inputs.stages == '' || inputs.stages == 'all' || inputs.stages == 'dev')
     runs-on: ubuntu-latest
     environment: ${{ needs.resolve-config.outputs.dev_environment }}
     steps:
@@ -161,7 +189,13 @@ jobs:
   drift-check:
     name: Check data drift (dev)
     needs: [resolve-config, deploy]
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.check_drift && needs.deploy.result == 'success' }}
+    # Explicit == true: GitHub UI checkboxes can leave a string/empty value that
+    # made bare `inputs.check_drift` look unset on some runs (see run #38).
+    if: >-
+      always()
+      && github.event_name == 'workflow_dispatch'
+      && (inputs.check_drift == true || inputs.check_drift == 'true')
+      && needs.deploy.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: ${{ needs.resolve-config.outputs.dev_environment }}
@@ -256,8 +290,9 @@ jobs:
       always()
       && github.event_name == 'workflow_dispatch'
       && needs.deploy.result == 'success'
-      && (inputs.run_training
-          || (inputs.check_drift && needs.drift-check.result == 'success'
+      && ((inputs.run_training == true || inputs.run_training == 'true')
+          || ((inputs.check_drift == true || inputs.check_drift == 'true')
+              && needs.drift-check.result == 'success'
               && needs.drift-check.outputs.drift_detected == 'true'))
     uses: ./.github/workflows/e2e-mlops-train.yml
     secrets: inherit
