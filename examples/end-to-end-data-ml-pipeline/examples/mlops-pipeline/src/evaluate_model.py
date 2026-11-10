@@ -174,13 +174,51 @@ def read_transform_scores(s3, eval_output_prefix):
     return predictions, pred_files
 
 
+def read_inference_features(s3, inference_data_path):
+    """Read feature rows from the batch-transform input prefix (sorted files).
+
+    Returns a list of feature vectors (list[float]) in the same row order the
+    transform job scored them.
+    """
+    parsed = urlparse(inference_data_path.rstrip("/"))
+    bucket = parsed.netloc
+    prefix = parsed.path.lstrip("/").rstrip("/") + "/"
+
+    objects = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+    csv_files = sorted(
+        obj["Key"]
+        for obj in objects.get("Contents", [])
+        if obj["Key"].endswith(".csv")
+        and obj["Key"].startswith(prefix)
+        and "/" not in obj["Key"][len(prefix) :]
+    )
+
+    features = []
+    for key in csv_files:
+        body = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
+        for line in body.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            features.append([float(x) for x in line.split(",")])
+    return features
+
+
 def write_enriched_predictions(
-    table_uri, scores, model_name, model_version, inference_timestamp
+    table_uri,
+    scores,
+    model_name,
+    model_version,
+    inference_timestamp,
+    feature_rows=None,
 ):
     """Append enriched scores to a Delta table (creates the table on first write).
 
     ``table_uri`` is a stable S3 prefix (e.g. .../evaluation/predictions_enriched)
     so successive evaluate / batch runs accumulate rows instead of overwriting.
+
+    ``features`` is stored as a JSON array string so schema stays stable across
+    appends (matches realtime ``inference.py`` payload shape).
 
     Converts via PyArrow explicitly — newer ``deltalake`` rejects raw pandas
     DataFrames in the sklearn processing image (Arrow C stream mismatch).
@@ -209,9 +247,26 @@ def write_enriched_predictions(
             f"Could not install/import deltalake for enriched predictions: {e}"
         ) from e
 
+    feature_rows = feature_rows or [[] for _ in scores]
+    if len(feature_rows) != len(scores):
+        raise ValueError(
+            f"Feature/score mismatch: {len(feature_rows)} feature rows vs {len(scores)} scores"
+        )
+
+    # Named feature maps (same shape as realtime inference.py JSON).
+    try:
+        from feature_schema import features_to_named
+    except ImportError:
+        # Processing image runs with src/ on the module path; keep a safe fallback.
+        def features_to_named(values):  # type: ignore
+            return {f"f{i}": float(v) for i, v in enumerate(values or [])}
+
+    named_features = [features_to_named(f) for f in feature_rows]
+
     df = pd.DataFrame(
         {
             "score": [float(s) for s in scores],
+            "features": [json.dumps(f) for f in named_features],
             "model_name": [str(model_name)] * len(scores),
             "model_version": [str(model_version)] * len(scores),
             "inference_timestamp": [str(inference_timestamp)] * len(scores),
@@ -344,11 +399,12 @@ def main():
 
     run_batch_transform(sm, transform_job_name, model_name, inference_data_path, eval_output_prefix)
 
-    # Step 4: Enrich raw transform scores with model identity + inference time
+    # Step 4: Enrich raw transform scores with features + model identity + time
     inference_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Pre-registry: training job name is the unique candidate version identifier.
     model_version = training_job_name
     scores, pred_files = read_transform_scores(s3, eval_output_prefix)
+    feature_rows = read_inference_features(s3, inference_data_path)
     # Stable Delta path (not per-model) so runs append into one table.
     enriched_table_uri = args.output_path.rstrip("/") + "/predictions_enriched"
     enriched_uri = write_enriched_predictions(
@@ -357,6 +413,7 @@ def main():
         model_name=model_name,
         model_version=model_version,
         inference_timestamp=inference_timestamp,
+        feature_rows=feature_rows,
     )
 
     # Step 5: Compute metrics

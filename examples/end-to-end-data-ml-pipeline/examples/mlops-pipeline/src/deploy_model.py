@@ -37,7 +37,9 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = "/opt/ml/processing/output"
 # Shipped next to this script via the deploy_pipeline ProcessingInput.
-INFERENCE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inference.py")
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+INFERENCE_SCRIPT = os.path.join(_SRC_DIR, "inference.py")
+FEATURE_SCHEMA_SCRIPT = os.path.join(_SRC_DIR, "feature_schema.py")
 
 # Sentinel value used by the promote/deploy GitHub workflows when an optional
 # CLI flag is unset. Translates to "no override" for ARN/URL pinning.
@@ -193,17 +195,29 @@ def package_realtime_serving_artifact(
     model_name: str,
     model_version: str,
     inference_script: str = INFERENCE_SCRIPT,
+    feature_schema_script: str = FEATURE_SCHEMA_SCRIPT,
 ) -> str:
     """Rebuild model.tar.gz with ``code/inference.py`` + serving metadata.
 
-    Realtime InvokeEndpoint then returns JSON rows with score, model_name,
-    model_version, and inference_timestamp (see ``inference.py``).
+    Realtime InvokeEndpoint then returns JSON rows with score, named features,
+    model_name, model_version, and inference_timestamp (see ``inference.py``).
     """
     if not os.path.isfile(inference_script):
         raise FileNotFoundError(f"Realtime inference script not found: {inference_script}")
+    if not os.path.isfile(feature_schema_script):
+        raise FileNotFoundError(f"Feature schema script not found: {feature_schema_script}")
 
     src_bucket, src_key = _parse_s3_uri(source_model_data_url)
     dest_bucket, dest_key = _parse_s3_uri(dest_model_data_url)
+
+    # Import locally so the processing image doesn't need a package install.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("feature_schema", feature_schema_script)
+    feature_schema = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(feature_schema)
+    feature_columns = list(feature_schema.FEATURE_COLUMNS)
 
     with tempfile.TemporaryDirectory() as tmp:
         local_tar = os.path.join(tmp, "source-model.tar.gz")
@@ -219,9 +233,11 @@ def package_realtime_serving_artifact(
         code_dir = os.path.join(extract_dir, "code")
         os.makedirs(code_dir, exist_ok=True)
         shutil.copy2(inference_script, os.path.join(code_dir, "inference.py"))
+        shutil.copy2(feature_schema_script, os.path.join(code_dir, "feature_schema.py"))
         meta = {
             "model_name": model_name,
             "model_version": str(model_version),
+            "feature_columns": feature_columns,
         }
         with open(os.path.join(code_dir, "serving_meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, sort_keys=True)

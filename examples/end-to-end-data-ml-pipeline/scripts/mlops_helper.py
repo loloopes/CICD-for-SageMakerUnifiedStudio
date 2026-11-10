@@ -508,9 +508,15 @@ def _parse_response(body_bytes: bytes) -> tuple[list[float], list[dict]]:
         for row in reader:
             score = float(str(row.get("score", "")).strip())
             scores.append(score)
+            features_raw = (row.get("features") or "").strip()
+            try:
+                features = json.loads(features_raw) if features_raw else []
+            except json.JSONDecodeError:
+                features = features_raw
             rows.append(
                 {
                     "score": score,
+                    "features": features,
                     "model_name": (row.get("model_name") or "").strip(),
                     "model_version": (row.get("model_version") or "").strip(),
                     "inference_timestamp": (row.get("inference_timestamp") or "").strip(),
@@ -569,15 +575,21 @@ def _format_enriched_predictions(
     inference_timestamp: str,
     rows: list[dict] | None = None,
 ) -> str:
-    """CSV with score, model_name, model_version, inference_timestamp."""
+    """CSV with score, features, model_name, model_version, inference_timestamp."""
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["score", "model_name", "model_version", "inference_timestamp"])
+    writer.writerow(
+        ["score", "features", "model_name", "model_version", "inference_timestamp"]
+    )
     if rows:
         for row in rows:
+            features = row.get("features", [])
+            if not isinstance(features, str):
+                features = json.dumps(features)
             writer.writerow(
                 [
                     row.get("score"),
+                    features,
                     row.get("model_name") or model_name,
                     row.get("model_version") or model_version,
                     row.get("inference_timestamp") or inference_timestamp,
@@ -585,7 +597,7 @@ def _format_enriched_predictions(
             )
     else:
         for score in scores:
-            writer.writerow([score, model_name, model_version, inference_timestamp])
+            writer.writerow([score, "[]", model_name, model_version, inference_timestamp])
     return buf.getvalue()
 
 

@@ -87,7 +87,8 @@ mlops-pipeline/
     ├── train_xgboost.py                 # XGBoost training script (SageMaker script mode)
     ├── evaluate_model.py                # Batch evaluation processing script
     ├── deploy_model.py                  # Endpoint deploy processing script (packs realtime inference.py)
-    ├── inference.py                     # Realtime InvokeEndpoint enrichment (score + model + timestamp)
+    ├── inference.py                     # Realtime InvokeEndpoint enrichment (score + named features + model + timestamp)
+    ├── feature_schema.py                # Feature column names/order for enrichment
     ├── requirements.txt                 # Training container deps (scikit-learn pinned to container version)
     └── notebooks/
         ├── evaluate_model.ipynb         # Interactive evaluation
@@ -108,7 +109,7 @@ Endpoint         : stack-prediction-<stage>   (e.g. stack-prediction-dev)
 
 After the pipeline completes, use `src/notebooks/validate_mlops.ipynb` to verify the training job status, the registered model version, endpoint health (`InService`), and a sample inference.
 
-**Realtime responses:** after `deploy_pipeline`, `InvokeEndpoint` returns JSON rows with `score`, `model_name`, `model_version`, and `inference_timestamp` (custom `inference.py` baked into the serving artifact). Batch evaluate still writes the same fields to the Delta `predictions_enriched` table.
+**Realtime / batch responses:** after `deploy_pipeline`, `InvokeEndpoint` returns JSON rows with `score`, `features` (named map matching `feature_schema.py` / FE columns), `model_name`, `model_version`, and `inference_timestamp`. Batch evaluate appends the same fields to Delta `predictions_enriched` (`features` as a JSON object string).
 
 ## Troubleshooting
 
