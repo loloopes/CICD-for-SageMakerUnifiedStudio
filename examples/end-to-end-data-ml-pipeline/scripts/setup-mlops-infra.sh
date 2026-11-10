@@ -169,23 +169,20 @@ def handler(event, context):
         logger.info(f"Ignoring non-approval event: {approval_status}")
         return {"statusCode": 200, "body": "Skipped - not an approval"}
 
-    # Loop protection. The promotion workflow stamps CustomerMetadataProperties
-    # on the package after each successful deploy, which re-emits a
-    # "Model Package State Change" event with ModelApprovalStatus=Approved.
-    # Those re-emits update ONLY CustomerMetadataProperties, whereas a genuine
-    # approval changes ModelApprovalStatus. SageMaker reports what changed in
-    # UpdatedModelPackageFields, so dispatch on every event that actually
-    # changed the approval status and skip metadata-only stamps. This works
-    # regardless of previousModelApprovalStatus (API/UI approvals omit it), so
-    # every genuine approval triggers the pipeline. If UpdatedModelPackageFields
-    # is absent we err toward dispatching; deploy stamps are update-model-package
-    # calls that always carry ["CustomerMetadataProperties"], so the loop stays
-    # protected.
-    if updated_fields and "ModelApprovalStatus" not in updated_fields:
+    # Loop protection. Genuine approvals include ModelApprovalStatus in
+    # UpdatedModelPackageFields (observed for console/API/UI). Deploy activity
+    # (CreateModel from package, CustomerMetadata stamps, additional inference
+    # specs) re-emits Model Package State Change with ModelApprovalStatus still
+    # "Approved" but UpdatedModelPackageFields either empty [] or listing only
+    # non-approval fields. The previous check used `if updated_fields and ...`,
+    # which treated [] as falsy and re-dispatched — creating an infinite
+    # approve → promote → deploy → state-change → approve loop. Require an
+    # explicit ModelApprovalStatus field change before dispatching.
+    if "ModelApprovalStatus" not in updated_fields:
         logger.info(
             "Ignoring update that did not change approval status "
             f"(UpdatedModelPackageFields={updated_fields}). Likely a deploy "
-            "metadata stamp, not a new approval."
+            "side-effect or metadata stamp, not a new approval."
         )
         return {"statusCode": 200, "body": "Skipped - approval status unchanged"}
 
@@ -314,11 +311,10 @@ EOF
 # missing - so user approvals were silently dropped.
 #
 # The Lambda handler still protects against the deploy-stamp loop on its own:
-# it skips events whose UpdatedModelPackageFields changed only
-# CustomerMetadataProperties (the post-deploy stamp) and dispatches on every
-# event that actually changed ModelApprovalStatus. The rule is intentionally
-# permissive: match every approval event, let the Lambda decide whether to
-# dispatch.
+# it dispatches ONLY when UpdatedModelPackageFields contains
+# ModelApprovalStatus (genuine approval). Empty [] or metadata-only updates
+# are skipped. The rule is intentionally permissive: match every Approved
+# package event, let the Lambda decide whether to dispatch.
 
 aws events put-rule \
   --name "$RULE_NAME" \
