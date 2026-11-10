@@ -9,6 +9,7 @@ Subcommands:
     capture-deploy-logs    Dump the latest deploy job's logs for postmortem.
     smoke-test             Invoke an endpoint and validate the response.
     read-drift-result      Read drift_check result.json and emit drift_detected.
+    resolve-batch-context  Resolve project s3_shared URI + userRoleArn for batch jobs.
 
 Each subcommand keeps the same flags as the prior standalone scripts. Exit
 codes are preserved so workflow YAMLs can keep relying on them.
@@ -816,6 +817,81 @@ def cmd_read_drift_result(args: argparse.Namespace) -> int:
 
 
 # =============================================================================
+# resolve-batch-context
+# =============================================================================
+
+
+def _resolve_domain_id_from_args(args: argparse.Namespace) -> str:
+    if getattr(args, "domain_id", None):
+        return args.domain_id
+    if getattr(args, "domain_name", None):
+        return _resolve_domain_id(args.region, domain_name=args.domain_name)
+    if getattr(args, "domain_tags", None):
+        return _resolve_domain_id(
+            args.region, domain_tags=_parse_domain_tags(args.domain_tags)
+        )
+    return _resolve_domain_id(args.region)
+
+
+def _resolve_project_user_role_arn(
+    domain_id: str, project_name: str, region: str
+) -> str:
+    """Return the DataZone tooling ``userRoleArn`` for a project."""
+    from smus_cicd.helpers import datazone as smus_datazone
+
+    project_id = smus_datazone.get_project_id_by_name(project_name, domain_id, region)
+    if not project_id:
+        raise ValueError(f"Project '{project_name}' not found in domain {domain_id}")
+
+    datazone = boto3.client("datazone", region_name=region)
+    environments = datazone.list_environments(
+        domainIdentifier=domain_id, projectIdentifier=project_id
+    ).get("items", [])
+
+    for env in environments:
+        detail = datazone.get_environment(
+            domainIdentifier=domain_id, identifier=env["id"]
+        )
+        for resource in detail.get("provisionedResources", []):
+            if resource.get("name") == "userRoleArn" and resource.get("value"):
+                return resource["value"]
+
+    raise ValueError(
+        f"Project '{project_name}' has no tooling environment userRoleArn "
+        f"in domain {domain_id}"
+    )
+
+
+def cmd_resolve_batch_context(args: argparse.Namespace) -> int:
+    """Emit shared S3 URI + project execution role for weekly Batch Transform."""
+    domain_id = _resolve_domain_id_from_args(args)
+    bucket, shared_prefix = _resolve_project_location(
+        domain_id, args.project_name, args.region
+    )
+    shared_uri = f"s3://{bucket}/{shared_prefix.strip('/')}"
+    role_arn = _resolve_project_user_role_arn(
+        domain_id, args.project_name, args.region
+    )
+
+    logger.info("=" * 60)
+    logger.info("RESOLVE BATCH CONTEXT")
+    logger.info("=" * 60)
+    logger.info(f"  Project    : {args.project_name}")
+    logger.info(f"  Domain     : {domain_id}")
+    logger.info(f"  Shared S3  : {shared_uri}")
+    logger.info(f"  Role ARN   : {role_arn}")
+
+    write_github_output(
+        {
+            "shared_s3_uri": shared_uri,
+            "project_role_arn": role_arn,
+            "domain_id": domain_id,
+        }
+    )
+    return 0
+
+
+# =============================================================================
 # CLI wiring
 # =============================================================================
 
@@ -913,6 +989,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path under the project's default.s3_shared for drift reports.",
     )
     sp.set_defaults(func=cmd_read_drift_result)
+
+    sp = sub.add_parser(
+        "resolve-batch-context",
+        help="Resolve project s3_shared URI + userRoleArn for batch inference.",
+    )
+    sp.add_argument("--project-name", required=True)
+    sp.add_argument("--region", required=True)
+    domain = sp.add_mutually_exclusive_group(required=False)
+    domain.add_argument("--domain-id", help="DataZone domain id (dzd-...)")
+    domain.add_argument("--domain-name", help="DataZone domain name")
+    domain.add_argument(
+        "--domain-tags",
+        help=(
+            "Comma-separated key=value tags to match a domain, "
+            "e.g. 'purpose=smus-cicd-testing'."
+        ),
+    )
+    sp.set_defaults(func=cmd_resolve_batch_context)
 
     return parser
 

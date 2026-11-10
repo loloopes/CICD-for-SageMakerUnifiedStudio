@@ -1,0 +1,136 @@
+# Weekly (or on-demand) SageMaker Batch Transform for the MLOps e2e example.
+# Resolves the SMUS project shared prefix + execution role, assumes that role
+# via OIDC role-chaining, then runs batch_inference_smoke.py.
+#
+# Schedule: set repository variable BATCH_INFERENCE_CRON (POSIX cron).
+# GitHub Actions requires a literal cron under on.schedule — keep that string
+# identical to BATCH_INFERENCE_CRON (default: Mondays 14:00 UTC).
+name: E2E Weekly Batch Inference
+
+on:
+  schedule:
+    # Literal required (expressions invalid here). Mirror vars.BATCH_INFERENCE_CRON.
+    - cron: '0 14 * * 1'
+  workflow_dispatch:
+    inputs:
+      split:
+        description: "Feature split to score"
+        required: false
+        default: train
+        type: choice
+        options: [train, validation, test]
+      max_rows:
+        description: "Cap rows sent to Batch Transform (0 = all)"
+        required: false
+        default: '0'
+      project_name:
+        description: "SMUS project (default: DEV_PROJECT_NAME / e2e-data-stack-ml-ops-dev)"
+        required: false
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  BATCH_INFERENCE_CRON: ${{ vars.BATCH_INFERENCE_CRON || '0 14 * * 1' }}
+
+jobs:
+  batch-inference:
+    name: Batch Transform (dev)
+    runs-on: ubuntu-latest
+    # Same env as e2e-mlops-pipeline today (single account).
+    environment: dev-aws-account
+    timeout-minutes: 90
+    # On schedule: only run when the triggering cron matches the configured var.
+    if: >-
+      github.event_name != 'schedule' ||
+      github.event.schedule == vars.BATCH_INFERENCE_CRON ||
+      (vars.BATCH_INFERENCE_CRON == '' && github.event.schedule == '0 14 * * 1')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Authenticate via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ vars.DOMAIN_REGION || 'us-east-2' }}
+          role-session-name: smus-batch-inference-oidc
+
+      - name: Install CLI + deps
+        run: pip install -e . boto3 -q
+
+      - name: Resolve project batch context
+        id: ctx
+        env:
+          PROJECT_NAME: ${{ inputs.project_name || vars.DEV_PROJECT_NAME || 'e2e-data-stack-ml-ops-dev' }}
+          REGION: ${{ vars.DOMAIN_REGION || 'us-east-2' }}
+          DOMAIN_TAG_PURPOSE: ${{ vars.DOMAIN_TAG_PURPOSE }}
+          # Optional overrides — skip DataZone lookup when both are set.
+          SHARED_S3_URI_OVERRIDE: ${{ vars.BATCH_SHARED_S3_URI }}
+          PROJECT_ROLE_ARN_OVERRIDE: ${{ vars.PROJECT_EXECUTION_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${SHARED_S3_URI_OVERRIDE:-}" ] && [ -n "${PROJECT_ROLE_ARN_OVERRIDE:-}" ]; then
+            echo "shared_s3_uri=${SHARED_S3_URI_OVERRIDE}" >> "$GITHUB_OUTPUT"
+            echo "project_role_arn=${PROJECT_ROLE_ARN_OVERRIDE}" >> "$GITHUB_OUTPUT"
+            echo "Using GitHub vars overrides for shared S3 + project role"
+            exit 0
+          fi
+
+          TAGS_ARG=()
+          if [ -n "${DOMAIN_TAG_PURPOSE:-}" ]; then
+            TAGS_ARG=(--domain-tags "purpose=${DOMAIN_TAG_PURPOSE}")
+          fi
+          python3 examples/end-to-end-data-ml-pipeline/scripts/mlops_helper.py \
+            resolve-batch-context \
+            --project-name "$PROJECT_NAME" \
+            --region "$REGION" \
+            "${TAGS_ARG[@]}"
+
+      - name: Assume project execution role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ steps.ctx.outputs.project_role_arn }}
+          aws-region: ${{ vars.DOMAIN_REGION || 'us-east-2' }}
+          role-session-name: smus-batch-inference
+          role-chaining: true
+
+      - name: Run batch inference
+        env:
+          REGION: ${{ vars.DOMAIN_REGION || 'us-east-2' }}
+          SHARED_S3_URI: ${{ steps.ctx.outputs.shared_s3_uri }}
+          PROJECT_ROLE_ARN: ${{ steps.ctx.outputs.project_role_arn }}
+          SPLIT: ${{ inputs.split || 'train' }}
+          MAX_ROWS: ${{ inputs.max_rows || '0' }}
+        run: |
+          set -euo pipefail
+          python3 examples/end-to-end-data-ml-pipeline/scripts/batch_inference_smoke.py \
+            --shared-s3-uri "$SHARED_S3_URI" \
+            --region "$REGION" \
+            --role-arn "$PROJECT_ROLE_ARN" \
+            --split "$SPLIT" \
+            --max-rows "$MAX_ROWS"
+
+      - name: Summary
+        if: always()
+        env:
+          SHARED_S3_URI: ${{ steps.ctx.outputs.shared_s3_uri }}
+          PROJECT_ROLE_ARN: ${{ steps.ctx.outputs.project_role_arn }}
+          SPLIT: ${{ inputs.split || 'train' }}
+          CRON: ${{ env.BATCH_INFERENCE_CRON }}
+        run: |
+          {
+            echo "### Weekly batch inference"
+            echo ""
+            echo "- **cron**: \`$CRON\` (vars.BATCH_INFERENCE_CRON)"
+            echo "- **split**: \`$SPLIT\`"
+            echo "- **shared S3**: \`$SHARED_S3_URI\`"
+            echo "- **role**: \`$PROJECT_ROLE_ARN\`"
+            echo "- **output**: \`…/stack/mlops_pipeline/models/evaluation/batch_smoke/\`"
+          } >> "$GITHUB_STEP_SUMMARY"
