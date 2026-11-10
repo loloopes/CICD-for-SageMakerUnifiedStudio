@@ -57,6 +57,8 @@ env:
 jobs:
   # Exposes the env values as job outputs, since the job-level `environment:` key
   # can't read the workflow `env` context directly.
+  # On push, inputs are empty — apply the same defaults as workflow_dispatch:
+  # stages=all, setup_infra=true, check_drift=true, run_training=false.
   resolve-config:
     runs-on: ubuntu-latest
     outputs:
@@ -69,6 +71,10 @@ jobs:
       dev_role_secret: ${{ steps.vars.outputs.dev_role_secret }}
       test_role_secret: ${{ steps.vars.outputs.test_role_secret }}
       prod_role_secret: ${{ steps.vars.outputs.prod_role_secret }}
+      stages: ${{ steps.vars.outputs.stages }}
+      setup_infra: ${{ steps.vars.outputs.setup_infra }}
+      check_drift: ${{ steps.vars.outputs.check_drift }}
+      run_training: ${{ steps.vars.outputs.run_training }}
     steps:
       - id: vars
         env:
@@ -79,6 +85,29 @@ jobs:
           INPUT_RUN_TRAINING: ${{ inputs.run_training }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
+          # Match workflow_dispatch input defaults when push leaves inputs unset.
+          STAGES="${INPUT_STAGES:-all}"
+          [ -n "${INPUT_STAGES:-}" ] || STAGES="all"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            SETUP_INFRA="${INPUT_SETUP_INFRA:-true}"
+            CHECK_DRIFT="${INPUT_CHECK_DRIFT:-true}"
+            RUN_TRAINING="${INPUT_RUN_TRAINING:-false}"
+          else
+            SETUP_INFRA="true"
+            CHECK_DRIFT="true"
+            RUN_TRAINING="false"
+          fi
+          # Normalize GitHub boolean/string quirks to lowercase true/false.
+          normalize_bool() {
+            case "$(echo "$1" | tr '[:upper:]' '[:lower:]')" in
+              true|1|yes) echo "true" ;;
+              *) echo "false" ;;
+            esac
+          }
+          SETUP_INFRA="$(normalize_bool "$SETUP_INFRA")"
+          CHECK_DRIFT="$(normalize_bool "$CHECK_DRIFT")"
+          RUN_TRAINING="$(normalize_bool "$RUN_TRAINING")"
+
           echo "dev_environment=$DEV_ENVIRONMENT" >> "$GITHUB_OUTPUT"
           echo "test_environment=$TEST_ENVIRONMENT" >> "$GITHUB_OUTPUT"
           echo "prod_environment=$PROD_ENVIRONMENT" >> "$GITHUB_OUTPUT"
@@ -88,21 +117,23 @@ jobs:
           echo "dev_role_secret=$DEV_ROLE_SECRET" >> "$GITHUB_OUTPUT"
           echo "test_role_secret=$TEST_ROLE_SECRET" >> "$GITHUB_OUTPUT"
           echo "prod_role_secret=$PROD_ROLE_SECRET" >> "$GITHUB_OUTPUT"
+          echo "stages=$STAGES" >> "$GITHUB_OUTPUT"
+          echo "setup_infra=$SETUP_INFRA" >> "$GITHUB_OUTPUT"
+          echo "check_drift=$CHECK_DRIFT" >> "$GITHUB_OUTPUT"
+          echo "run_training=$RUN_TRAINING" >> "$GITHUB_OUTPUT"
           {
             echo "### Workflow inputs"
             echo ""
             echo "- **event**: \`$EVENT_NAME\`"
-            echo "- **stages**: \`${INPUT_STAGES:-}\`"
-            echo "- **setup_infra**: \`${INPUT_SETUP_INFRA:-}\`"
-            echo "- **check_drift**: \`${INPUT_CHECK_DRIFT:-}\`"
-            echo "- **run_training**: \`${INPUT_RUN_TRAINING:-}\`"
+            echo "- **stages**: \`$STAGES\`"
+            echo "- **setup_infra**: \`$SETUP_INFRA\`"
+            echo "- **check_drift**: \`$CHECK_DRIFT\`"
+            echo "- **run_training**: \`$RUN_TRAINING\`"
             echo ""
-            if [ "$EVENT_NAME" = "workflow_dispatch" ] && { [ "$INPUT_CHECK_DRIFT" = "true" ] || [ "$INPUT_CHECK_DRIFT" = "True" ]; }; then
+            if [ "$CHECK_DRIFT" = "true" ]; then
               echo "Drift check **will run** after deploy succeeds."
-            elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-              echo "Drift check **will be skipped** (\`check_drift\` is not true)."
             else
-              echo "Drift check runs only on \`workflow_dispatch\` (this event: \`$EVENT_NAME\`)."
+              echo "Drift check **will be skipped** (\`check_drift\` is not true)."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -111,10 +142,9 @@ jobs:
     name: Setup ML Training Pipeline Infrastructure (dev)
     needs: [resolve-config]
     if: >-
-      (github.event_name != 'workflow_dispatch'
-       || inputs.setup_infra == true
-       || inputs.setup_infra == 'true')
-      && (inputs.stages == '' || inputs.stages == 'all' || inputs.stages == 'dev')
+      needs.resolve-config.outputs.setup_infra == 'true'
+      && (needs.resolve-config.outputs.stages == 'all'
+          || needs.resolve-config.outputs.stages == 'dev')
     runs-on: ubuntu-latest
     environment: ${{ needs.resolve-config.outputs.dev_environment }}
     steps:
@@ -167,9 +197,9 @@ jobs:
       matrix:
         include: >-
           ${{ fromJSON(
-          inputs.stages == 'dev' && format('[{{"stage":"dev","role_secret":"{0}","environment":"{1}"}}]', needs.resolve-config.outputs.dev_role_secret, needs.resolve-config.outputs.dev_environment)
-          || inputs.stages == 'test' && format('[{{"stage":"test","role_secret":"{0}","environment":"{1}"}}]', needs.resolve-config.outputs.test_role_secret, needs.resolve-config.outputs.test_environment)
-          || inputs.stages == 'prod' && format('[{{"stage":"prod","role_secret":"{0}","environment":"{1}"}}]', needs.resolve-config.outputs.prod_role_secret, needs.resolve-config.outputs.prod_environment)
+          needs.resolve-config.outputs.stages == 'dev' && format('[{{"stage":"dev","role_secret":"{0}","environment":"{1}"}}]', needs.resolve-config.outputs.dev_role_secret, needs.resolve-config.outputs.dev_environment)
+          || needs.resolve-config.outputs.stages == 'test' && format('[{{"stage":"test","role_secret":"{0}","environment":"{1}"}}]', needs.resolve-config.outputs.test_role_secret, needs.resolve-config.outputs.test_environment)
+          || needs.resolve-config.outputs.stages == 'prod' && format('[{{"stage":"prod","role_secret":"{0}","environment":"{1}"}}]', needs.resolve-config.outputs.prod_role_secret, needs.resolve-config.outputs.prod_environment)
           || format('[{{"stage":"dev","role_secret":"{0}","environment":"{1}"}},{{"stage":"test","role_secret":"{2}","environment":"{3}"}},{{"stage":"prod","role_secret":"{4}","environment":"{5}"}}]', needs.resolve-config.outputs.dev_role_secret, needs.resolve-config.outputs.dev_environment, needs.resolve-config.outputs.test_role_secret, needs.resolve-config.outputs.test_environment, needs.resolve-config.outputs.prod_role_secret, needs.resolve-config.outputs.prod_environment)
           ) }}
     uses: ./.github/workflows/smus-direct-deploy.yml
@@ -184,17 +214,15 @@ jobs:
       # Ensures the MLflow tracking server exists (creates it only if missing).
       setup_mlflow: true
 
-  # Optional: compare current DataOps data vs last training reference (workflow_dispatch).
+  # Optional: compare current DataOps data vs last training reference.
   # Missing reference / result => drift_detected=true so the first train can bootstrap.
+  # Runs on push and workflow_dispatch when resolved check_drift=true.
   drift-check:
     name: Check data drift (dev)
     needs: [resolve-config, deploy]
-    # Explicit == true: GitHub UI checkboxes can leave a string/empty value that
-    # made bare `inputs.check_drift` look unset on some runs (see run #38).
     if: >-
       always()
-      && github.event_name == 'workflow_dispatch'
-      && (inputs.check_drift == true || inputs.check_drift == 'true')
+      && needs.resolve-config.outputs.check_drift == 'true'
       && needs.deploy.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -284,14 +312,13 @@ jobs:
   # Standalone retrain without redeploy: use e2e-mlops-train.yml.
   train:
     name: Run training_pipeline (dev)
-    needs: [deploy, drift-check]
+    needs: [resolve-config, deploy, drift-check]
     # always() so force-train still runs when drift-check was skipped (check_drift=false).
     if: >-
       always()
-      && github.event_name == 'workflow_dispatch'
       && needs.deploy.result == 'success'
-      && ((inputs.run_training == true || inputs.run_training == 'true')
-          || ((inputs.check_drift == true || inputs.check_drift == 'true')
+      && ((needs.resolve-config.outputs.run_training == 'true')
+          || ((needs.resolve-config.outputs.check_drift == 'true')
               && needs.drift-check.result == 'success'
               && needs.drift-check.outputs.drift_detected == 'true'))
     uses: ./.github/workflows/e2e-mlops-train.yml
