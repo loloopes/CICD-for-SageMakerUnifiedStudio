@@ -264,6 +264,11 @@ def package_realtime_serving_artifact(
     return dest_model_data_url
 
 
+# Named additional inference spec on the model package. CreateModel selects it
+# via InferenceSpecificationName so Studio still marks the version Deployed.
+REALTIME_INFERENCE_SPEC_NAME = "realtime-enriched"
+
+
 def _realtime_container_env(model_name: str, model_version: str) -> dict:
     return {
         "SAGEMAKER_PROGRAM": "inference.py",
@@ -273,67 +278,65 @@ def _realtime_container_env(model_name: str, model_version: str) -> dict:
     }
 
 
-def bind_package_to_serving_artifact(
+def _package_additional_spec_names(sm, model_package_arn: str):
+    details = sm.describe_model_package(ModelPackageName=model_package_arn)
+    specs = details.get("AdditionalInferenceSpecifications") or []
+    return {s["Name"] for s in specs if s.get("Name")}
+
+
+def ensure_realtime_inference_spec(
     sm,
-    model_package,
-    image_uri,
-    serving_model_data_url,
-    model_name,
-    model_version,
-):
-    """Point the registered version at the stage-local enriched serving artifact.
+    model_package_arn: str,
+    image_uri: str,
+    serving_model_data_url: str,
+    model_name: str,
+    model_version: str,
+) -> str:
+    """Attach (or reuse) an additional inference spec pointing at the enriched tarball.
 
-    Studio marks a version **Deployed** only when an endpoint Model is created
-    with ``ModelPackageName`` set to that version's ARN. Updating the package
-    InferenceSpecification first lets us keep ``inference.py`` enrichment while
-    still creating the Model from the package (instead of a detached image+URL
-    Model that leaves the version as **Not deployed**).
-
-    Safe for the approve→promote loop: Lambda only re-dispatches when
-    ``ModelApprovalStatus`` changes; InferenceSpecification-only updates are skipped.
+    Primary InferenceSpecification cannot be rewritten after registration.
+    AdditionalInferenceSpecificationsToAdd + CreateModel(InferenceSpecificationName=...)
+    keeps registry Deployed linkage while serving ``inference.py``.
     """
-    model_package_arn = model_package["ModelPackageArn"]
-    inf = model_package.get("InferenceSpecification") or {}
-    containers = [dict(c) for c in (inf.get("Containers") or [])]
-    env = _realtime_container_env(model_name, model_version)
-
-    if containers:
-        c0 = containers[0]
-        c0["ModelDataUrl"] = serving_model_data_url
-        if image_uri:
-            c0["Image"] = image_uri
-        merged = dict(c0.get("Environment") or {})
-        merged.update(env)
-        c0["Environment"] = merged
-        # ModelPackageName create path rejects Image+ModelDataUrl on the Model;
-        # they must live on the package container.
-        containers[0] = c0
+    existing = _package_additional_spec_names(sm, model_package_arn)
+    # Prefer a stable name; if it already exists (prior deploy of this version),
+    # mint a unique one so ModelDataUrl can point at this run's serving artifact.
+    if REALTIME_INFERENCE_SPEC_NAME not in existing:
+        spec_name = REALTIME_INFERENCE_SPEC_NAME
     else:
-        containers = [
-            {
-                "Image": image_uri,
-                "ModelDataUrl": serving_model_data_url,
-                "Environment": env,
-            }
-        ]
-
-    spec = {
-        "Containers": containers,
-        "SupportedContentTypes": inf.get("SupportedContentTypes") or ["text/csv"],
-        "SupportedResponseMIMETypes": inf.get("SupportedResponseMIMETypes")
-        or ["application/json", "text/csv"],
-        "SupportedRealtimeInferenceInstanceTypes": inf.get(
-            "SupportedRealtimeInferenceInstanceTypes"
+        spec_name = f"realtime-{int(time.time())}"
+        logger.info(
+            f"  Spec '{REALTIME_INFERENCE_SPEC_NAME}' already on package; "
+            f"adding '{spec_name}' for this serving artifact"
         )
-        or ["ml.m5.large", "ml.m5.xlarge"],
-        "SupportedTransformInstanceTypes": inf.get("SupportedTransformInstanceTypes")
-        or ["ml.m5.large"],
-    }
+
     logger.info(
-        f"Binding model package to realtime serving artifact: {serving_model_data_url}"
+        f"Adding package inference spec '{spec_name}' → {serving_model_data_url}"
     )
-    sm.update_model_package(ModelPackageArn=model_package_arn, InferenceSpecification=spec)
-    logger.info("  Updated package InferenceSpecification for realtime serving")
+    sm.update_model_package(
+        ModelPackageArn=model_package_arn,
+        AdditionalInferenceSpecificationsToAdd=[
+            {
+                "Name": spec_name,
+                "Description": "Realtime serving with inference.py enrichment",
+                "Containers": [
+                    {
+                        "Image": image_uri,
+                        "ModelDataUrl": serving_model_data_url,
+                        "Environment": _realtime_container_env(model_name, model_version),
+                    }
+                ],
+                "SupportedContentTypes": ["text/csv"],
+                "SupportedResponseMIMETypes": ["application/json", "text/csv"],
+                "SupportedRealtimeInferenceInstanceTypes": [
+                    "ml.m5.large",
+                    "ml.m5.xlarge",
+                ],
+                "SupportedTransformInstanceTypes": ["ml.m5.large"],
+            }
+        ],
+    )
+    return spec_name
 
 
 def create_sagemaker_model(
@@ -349,33 +352,48 @@ def create_sagemaker_model(
 ):
     """Create a SageMaker Model linked to the registry when possible.
 
-    Prefer ``ModelPackageName`` so Unified Studio shows the version as Deployed.
-    When realtime enrichment is required, first rebind the package container to
-    the stage-local serving artifact (with ``inference.py``), then create from
-    the package. Fall back to a detached image + ModelDataUrl Model if binding
-    or package create fails (endpoint still works; registry status may stay
-    Not deployed).
+    For realtime enrichment: add an additional inference spec on the approved
+    package that points at the stage-local serving tarball, then create the
+    Model with ``ModelPackageName`` + ``InferenceSpecificationName``. That is
+    what Unified Studio uses to show the version as **Deployed**, while still
+    serving ``inference.py``. Falls back to a detached image+URL Model if the
+    package path is rejected.
     """
     logger.info(f"Creating SageMaker model: {model_name}")
     created_from_package = False
+    inference_spec_name = None
 
     if use_realtime_inference_script and model_package is not None:
         try:
-            bind_package_to_serving_artifact(
+            inference_spec_name = ensure_realtime_inference_spec(
                 sm,
-                model_package,
+                model_package_arn,
                 image_uri,
                 model_data_url,
                 model_name,
                 model_version,
             )
-        except sm.exceptions.ClientError as e:
-            logger.warning(
-                f"  Could not bind package to serving artifact (will fall back): {e}"
+            sm.create_model(
+                ModelName=model_name,
+                Containers=[
+                    {
+                        "ModelPackageName": model_package_arn,
+                        "InferenceSpecificationName": inference_spec_name,
+                    }
+                ],
+                ExecutionRoleArn=execution_role_arn,
             )
-            model_package = None  # skip package create path below
+            logger.info(
+                f"  Created from model package spec '{inference_spec_name}' "
+                "(registry Deployed linkage + realtime enrichment)"
+            )
+            return True
+        except Exception as e:  # noqa: BLE001 — ParamValidationError or ClientError
+            logger.warning(
+                f"  Package+realtime spec path failed (will fall back to image+URL): {e}"
+            )
 
-    if model_package is not None or not use_realtime_inference_script:
+    elif model_package is not None:
         try:
             sm.create_model(
                 ModelName=model_name,
@@ -383,8 +401,7 @@ def create_sagemaker_model(
                 ExecutionRoleArn=execution_role_arn,
             )
             logger.info("  Created from model package (registry Deployed linkage)")
-            created_from_package = True
-            return created_from_package
+            return True
         except sm.exceptions.ClientError as e:
             logger.warning(f"  Model package approach failed: {e}")
             logger.info("  Falling back to image + model data URL")
@@ -395,7 +412,7 @@ def create_sagemaker_model(
     }
     if use_realtime_inference_script:
         container["Environment"] = _realtime_container_env(model_name, model_version)
-        logger.info("  Realtime enrichment enabled (inference.py)")
+        logger.info("  Realtime enrichment enabled (inference.py via image + ModelDataUrl)")
 
     sm.create_model(
         ModelName=model_name,
@@ -691,9 +708,8 @@ def main():
         model_version=model_version,
     )
 
-    # Bind enriched artifact onto the package, then create Model from
-    # ModelPackageName so Studio shows this version as Deployed. Falls back to
-    # a detached image+URL Model if package bind/create is rejected.
+    # Attach enriched serving tarball as an additional package inference spec,
+    # then create Model from ModelPackageName so Studio shows Deployed.
     created_from_package = create_sagemaker_model(
         sm,
         model_name,
