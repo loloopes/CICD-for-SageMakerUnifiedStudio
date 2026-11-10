@@ -1,8 +1,9 @@
 """Evaluate Model - SageMaker Processing Script.
 
-Finds the latest training job, creates a SageMaker Model, runs batch
-predictions on the test set, computes evaluation metrics (AUC, accuracy, F1),
-and logs results to MLflow.
+Finds the latest training job, creates an ephemeral SageMaker Model for Batch
+Transform, runs predictions on the test set, computes evaluation metrics
+(AUC, accuracy, F1), logs results to MLflow, then deletes the Model so only
+the Model Registry group retains persisted versions.
 
 This script is designed to run as a SageMaker Processing job via the
 SageMakerProcessingOperator in the training pipeline workflow.
@@ -78,8 +79,35 @@ def create_model(sm, model_name, image_uri, model_data_url, execution_role_arn):
         PrimaryContainer={"Image": image_uri, "ModelDataUrl": model_data_url},
         ExecutionRoleArn=execution_role_arn,
     )
-    logger.info(f"Created model: {model_name}")
+    logger.info(f"Created ephemeral model: {model_name}")
 
+
+def delete_model_if_exists(sm, model_name):
+    """Best-effort delete of a SageMaker Model (eval models are ephemeral)."""
+    try:
+        sm.delete_model(ModelName=model_name)
+        logger.info(f"Deleted ephemeral model: {model_name}")
+    except sm.exceptions.ClientError as e:
+        if "Could not find model" in str(e):
+            logger.info(f"Model already gone: {model_name}")
+        else:
+            logger.warning(f"Could not delete model {model_name}: {e}")
+
+
+def cleanup_ephemeral_models(sm, name_prefix, keep=None):
+    """Delete leftover eval Models matching ``name_prefix`` (except ``keep``)."""
+    keep = keep or set()
+    paginator = sm.get_paginator("list_models")
+    deleted = 0
+    for page in paginator.paginate(NameContains=name_prefix, MaxResults=100):
+        for summary in page.get("Models", []):
+            name = summary["ModelName"]
+            if not name.startswith(name_prefix) or name in keep:
+                continue
+            delete_model_if_exists(sm, name)
+            deleted += 1
+    if deleted:
+        logger.info(f"Cleaned up {deleted} ephemeral model(s) with prefix {name_prefix}")
 
 
 def prepare_inference_data(s3, test_data_path, model_name):
@@ -407,77 +435,82 @@ def main():
     logger.info(f"Model name:   {model_name}")
     logger.info(f"Model data:   {model_data_url}")
 
-    # Step 2: Create SageMaker model
+    # Step 2: Create ephemeral SageMaker model for Batch Transform only.
+    # Registry persistence happens later in register_model (stack-prediction-models).
     create_model(sm, model_name, args.image_uri, model_data_url, args.execution_role_arn)
+    try:
+        # Step 3: Prepare inference data and run batch transform
+        inference_data_path = prepare_inference_data(s3, args.test_data_path, model_name)
+        eval_output_prefix = args.output_path.rstrip("/") + f"/{model_name}/"
+        transform_job_name = f"stack-eval{suffix}"
 
-    # Step 3: Prepare inference data and run batch transform
-    inference_data_path = prepare_inference_data(s3, args.test_data_path, model_name)
-    eval_output_prefix = args.output_path.rstrip("/") + f"/{model_name}/"
-    transform_job_name = f"stack-eval{suffix}"
+        run_batch_transform(sm, transform_job_name, model_name, inference_data_path, eval_output_prefix)
 
-    run_batch_transform(sm, transform_job_name, model_name, inference_data_path, eval_output_prefix)
+        # Step 4: Enrich raw transform scores with features + model identity + time
+        inference_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Pre-registry: training job name is the unique candidate version identifier.
+        model_version = training_job_name
+        scores, pred_files = read_transform_scores(s3, eval_output_prefix)
+        feature_rows = read_inference_features(s3, inference_data_path)
+        # Stable Delta path (not per-model) so runs append into one table.
+        enriched_table_uri = args.output_path.rstrip("/") + "/predictions_enriched"
+        enriched_uri = write_enriched_predictions(
+            enriched_table_uri,
+            scores,
+            model_name=model_name,
+            model_version=model_version,
+            inference_timestamp=inference_timestamp,
+            feature_rows=feature_rows,
+        )
 
-    # Step 4: Enrich raw transform scores with features + model identity + time
-    inference_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Pre-registry: training job name is the unique candidate version identifier.
-    model_version = training_job_name
-    scores, pred_files = read_transform_scores(s3, eval_output_prefix)
-    feature_rows = read_inference_features(s3, inference_data_path)
-    # Stable Delta path (not per-model) so runs append into one table.
-    enriched_table_uri = args.output_path.rstrip("/") + "/predictions_enriched"
-    enriched_uri = write_enriched_predictions(
-        enriched_table_uri,
-        scores,
-        model_name=model_name,
-        model_version=model_version,
-        inference_timestamp=inference_timestamp,
-        feature_rows=feature_rows,
-    )
+        # Step 5: Compute metrics
+        metrics = compute_metrics(s3, args.test_data_path, scores, pred_files=pred_files)
 
-    # Step 5: Compute metrics
-    metrics = compute_metrics(s3, args.test_data_path, scores, pred_files=pred_files)
+        # Step 6: Save evaluation report to S3
+        evaluation_report = {
+            "training_job": training_job_name,
+            "model_name": model_name,
+            "model_version": model_version,
+            "inference_timestamp": inference_timestamp,
+            "enriched_predictions_uri": enriched_uri,
+            "model_data_url": model_data_url,
+            "metrics": metrics,
+        }
 
-    # Step 6: Save evaluation report to S3
-    evaluation_report = {
-        "training_job": training_job_name,
-        "model_name": model_name,
-        "model_version": model_version,
-        "inference_timestamp": inference_timestamp,
-        "enriched_predictions_uri": enriched_uri,
-        "model_data_url": model_data_url,
-        "metrics": metrics,
-    }
+        pred_parsed = urlparse(eval_output_prefix.rstrip("/"))
+        report_key = pred_parsed.path.lstrip("/").rstrip("/") + "/evaluation_report.json"
+        s3.put_object(
+            Bucket=pred_parsed.netloc,
+            Key=report_key,
+            Body=json.dumps(evaluation_report, indent=2, default=str),
+            ContentType="application/json",
+        )
+        logger.info(f"Evaluation report saved to s3://{pred_parsed.netloc}/{report_key}")
 
-    pred_parsed = urlparse(eval_output_prefix.rstrip("/"))
-    report_key = pred_parsed.path.lstrip("/").rstrip("/") + "/evaluation_report.json"
-    s3.put_object(
-        Bucket=pred_parsed.netloc,
-        Key=report_key,
-        Body=json.dumps(evaluation_report, indent=2, default=str),
-        ContentType="application/json",
-    )
-    logger.info(f"Evaluation report saved to s3://{pred_parsed.netloc}/{report_key}")
+        # Step 7: Log to MLflow
+        log_to_mlflow(
+            args.tracking_server_arn, args.experiment_name,
+            training_job_name, model_name, metrics,
+        )
 
-    # Step 7: Log to MLflow
-    log_to_mlflow(
-        args.tracking_server_arn, args.experiment_name,
-        training_job_name, model_name, metrics,
-    )
-
-    # Summary
-    logger.info("=" * 60)
-    logger.info("EVALUATION SUMMARY")
-    logger.info("=" * 60)
-    logger.info(f"  Training Job:  {training_job_name}")
-    logger.info(f"  Model:         {model_name}")
-    logger.info(f"  Version:       {model_version}")
-    logger.info(f"  Inferred at:   {inference_timestamp}")
-    logger.info(f"  Enriched Delta: {enriched_uri}")
-    logger.info(f"  AUC:           {metrics['auc']:.4f}")
-    logger.info(f"  Accuracy:      {metrics['accuracy']:.4f}")
-    logger.info(f"  F1:            {metrics['f1']:.4f}")
-    logger.info(f"  Test Samples:  {metrics['test_samples']}")
-    logger.info("=" * 60)
+        # Summary
+        logger.info("=" * 60)
+        logger.info("EVALUATION SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"  Training Job:  {training_job_name}")
+        logger.info(f"  Model:         {model_name}")
+        logger.info(f"  Version:       {model_version}")
+        logger.info(f"  Inferred at:   {inference_timestamp}")
+        logger.info(f"  Enriched Delta: {enriched_uri}")
+        logger.info(f"  AUC:           {metrics['auc']:.4f}")
+        logger.info(f"  Accuracy:      {metrics['accuracy']:.4f}")
+        logger.info(f"  F1:            {metrics['f1']:.4f}")
+        logger.info(f"  Test Samples:  {metrics['test_samples']}")
+        logger.info("=" * 60)
+    finally:
+        # Transform no longer needs the Model; do not leave it in "My models".
+        delete_model_if_exists(sm, model_name)
+        cleanup_ephemeral_models(sm, args.model_prefix, keep={model_name})
 
 
 if __name__ == "__main__":

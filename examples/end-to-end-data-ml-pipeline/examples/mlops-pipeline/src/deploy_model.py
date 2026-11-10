@@ -264,6 +264,78 @@ def package_realtime_serving_artifact(
     return dest_model_data_url
 
 
+def _realtime_container_env(model_name: str, model_version: str) -> dict:
+    return {
+        "SAGEMAKER_PROGRAM": "inference.py",
+        "SAGEMAKER_SUBMIT_DIRECTORY": "/opt/ml/model/code",
+        "MODEL_NAME": model_name,
+        "MODEL_VERSION": str(model_version),
+    }
+
+
+def bind_package_to_serving_artifact(
+    sm,
+    model_package,
+    image_uri,
+    serving_model_data_url,
+    model_name,
+    model_version,
+):
+    """Point the registered version at the stage-local enriched serving artifact.
+
+    Studio marks a version **Deployed** only when an endpoint Model is created
+    with ``ModelPackageName`` set to that version's ARN. Updating the package
+    InferenceSpecification first lets us keep ``inference.py`` enrichment while
+    still creating the Model from the package (instead of a detached image+URL
+    Model that leaves the version as **Not deployed**).
+
+    Safe for the approve→promote loop: Lambda only re-dispatches when
+    ``ModelApprovalStatus`` changes; InferenceSpecification-only updates are skipped.
+    """
+    model_package_arn = model_package["ModelPackageArn"]
+    inf = model_package.get("InferenceSpecification") or {}
+    containers = [dict(c) for c in (inf.get("Containers") or [])]
+    env = _realtime_container_env(model_name, model_version)
+
+    if containers:
+        c0 = containers[0]
+        c0["ModelDataUrl"] = serving_model_data_url
+        if image_uri:
+            c0["Image"] = image_uri
+        merged = dict(c0.get("Environment") or {})
+        merged.update(env)
+        c0["Environment"] = merged
+        # ModelPackageName create path rejects Image+ModelDataUrl on the Model;
+        # they must live on the package container.
+        containers[0] = c0
+    else:
+        containers = [
+            {
+                "Image": image_uri,
+                "ModelDataUrl": serving_model_data_url,
+                "Environment": env,
+            }
+        ]
+
+    spec = {
+        "Containers": containers,
+        "SupportedContentTypes": inf.get("SupportedContentTypes") or ["text/csv"],
+        "SupportedResponseMIMETypes": inf.get("SupportedResponseMIMETypes")
+        or ["application/json", "text/csv"],
+        "SupportedRealtimeInferenceInstanceTypes": inf.get(
+            "SupportedRealtimeInferenceInstanceTypes"
+        )
+        or ["ml.m5.large", "ml.m5.xlarge"],
+        "SupportedTransformInstanceTypes": inf.get("SupportedTransformInstanceTypes")
+        or ["ml.m5.large"],
+    }
+    logger.info(
+        f"Binding model package to realtime serving artifact: {serving_model_data_url}"
+    )
+    sm.update_model_package(ModelPackageArn=model_package_arn, InferenceSpecification=spec)
+    logger.info("  Updated package InferenceSpecification for realtime serving")
+
+
 def create_sagemaker_model(
     sm,
     model_name,
@@ -271,49 +343,58 @@ def create_sagemaker_model(
     image_uri,
     model_data_url,
     execution_role_arn,
-    prefer_data_url=False,
+    model_package=None,
     model_version: str = "unknown",
     use_realtime_inference_script: bool = False,
 ):
-    """Create a SageMaker Model.
+    """Create a SageMaker Model linked to the registry when possible.
 
-    By default tries the model package first, then falls back to image + data URL.
-    When ``prefer_data_url`` is True (promote staged the artifact into the target
-    project's bucket), skip the package path — ModelPackageName always points at
-    the *source* ModelDataUrl, which the target stage role often cannot read.
-
-    When ``use_realtime_inference_script`` is True, always create from image +
-    ModelDataUrl and set container env so ``code/inference.py`` enriches responses.
+    Prefer ``ModelPackageName`` so Unified Studio shows the version as Deployed.
+    When realtime enrichment is required, first rebind the package container to
+    the stage-local serving artifact (with ``inference.py``), then create from
+    the package. Fall back to a detached image + ModelDataUrl Model if binding
+    or package create fails (endpoint still works; registry status may stay
+    Not deployed).
     """
     logger.info(f"Creating SageMaker model: {model_name}")
+    created_from_package = False
 
-    if use_realtime_inference_script:
-        prefer_data_url = True
+    if use_realtime_inference_script and model_package is not None:
+        try:
+            bind_package_to_serving_artifact(
+                sm,
+                model_package,
+                image_uri,
+                model_data_url,
+                model_name,
+                model_version,
+            )
+        except sm.exceptions.ClientError as e:
+            logger.warning(
+                f"  Could not bind package to serving artifact (will fall back): {e}"
+            )
+            model_package = None  # skip package create path below
 
-    if not prefer_data_url:
+    if model_package is not None or not use_realtime_inference_script:
         try:
             sm.create_model(
                 ModelName=model_name,
                 Containers=[{"ModelPackageName": model_package_arn}],
                 ExecutionRoleArn=execution_role_arn,
             )
-            logger.info(f"  Created from model package")
-            return
+            logger.info("  Created from model package (registry Deployed linkage)")
+            created_from_package = True
+            return created_from_package
         except sm.exceptions.ClientError as e:
             logger.warning(f"  Model package approach failed: {e}")
-            logger.info(f"  Falling back to image + model data URL")
+            logger.info("  Falling back to image + model data URL")
 
     container = {
         "Image": image_uri,
         "ModelDataUrl": model_data_url,
     }
     if use_realtime_inference_script:
-        container["Environment"] = {
-            "SAGEMAKER_PROGRAM": "inference.py",
-            "SAGEMAKER_SUBMIT_DIRECTORY": "/opt/ml/model/code",
-            "MODEL_NAME": model_name,
-            "MODEL_VERSION": str(model_version),
-        }
+        container["Environment"] = _realtime_container_env(model_name, model_version)
         logger.info("  Realtime enrichment enabled (inference.py)")
 
     sm.create_model(
@@ -321,7 +402,76 @@ def create_sagemaker_model(
         PrimaryContainer=container,
         ExecutionRoleArn=execution_role_arn,
     )
-    logger.info(f"  Created from image + data URL")
+    logger.info("  Created from image + data URL (registry may show Not deployed)")
+    return created_from_package
+
+
+def _safe_delete_endpoint_config(sm, config_name):
+    """Best-effort delete of an endpoint config no longer serving traffic."""
+    try:
+        sm.delete_endpoint_config(EndpointConfigName=config_name)
+        logger.info(f"Deleted orphaned endpoint config: {config_name}")
+        return True
+    except sm.exceptions.ClientError as e:
+        logger.warning(f"Could not delete endpoint config {config_name}: {e}")
+        return False
+
+
+def _safe_delete_model(sm, model_name):
+    """Best-effort delete of a SageMaker Model no longer referenced by the endpoint."""
+    try:
+        sm.delete_model(ModelName=model_name)
+        logger.info(f"Deleted orphaned model: {model_name}")
+        return True
+    except sm.exceptions.ClientError as e:
+        logger.warning(f"Could not delete model {model_name}: {e}")
+        return False
+
+
+def cleanup_orphaned_endpoint_resources(sm, endpoint_name, keep_model_name, keep_config_name):
+    """Remove prior deploy Models/configs for this endpoint; keep only the live pair.
+
+    Deploy creates a unique ``{endpoint}-config-{ts}`` and ``{endpoint}-{ts}`` each
+    run. After the endpoint is InService on the new pair, older resources are
+    safe to drop so they do not clutter "My models".
+    """
+    config_prefix = f"{endpoint_name}-config-"
+    model_prefix = f"{endpoint_name}-"
+
+    # Configs first — Models cannot be deleted while an endpoint config still
+    # references them.
+    config_paginator = sm.get_paginator("list_endpoint_configs")
+    for page in config_paginator.paginate(NameContains=endpoint_name, MaxResults=100):
+        for summary in page.get("EndpointConfigs", []):
+            name = summary["EndpointConfigName"]
+            if name == keep_config_name or not name.startswith(config_prefix):
+                continue
+            try:
+                details = sm.describe_endpoint_config(EndpointConfigName=name)
+            except sm.exceptions.ClientError as e:
+                logger.warning(f"Could not describe endpoint config {name}: {e}")
+                continue
+            variant_models = {
+                v.get("ModelName")
+                for v in details.get("ProductionVariants", [])
+                if v.get("ModelName")
+            }
+            if _safe_delete_endpoint_config(sm, name):
+                for old_model in variant_models:
+                    if old_model and old_model != keep_model_name:
+                        _safe_delete_model(sm, old_model)
+
+    # Sweep any leftover Models with this endpoint naming pattern.
+    model_paginator = sm.get_paginator("list_models")
+    for page in model_paginator.paginate(NameContains=endpoint_name, MaxResults=100):
+        for summary in page.get("Models", []):
+            name = summary["ModelName"]
+            if name == keep_model_name or not name.startswith(model_prefix):
+                continue
+            # Skip configs mistaken as models (should not happen) and the live model.
+            if name.startswith(config_prefix):
+                continue
+            _safe_delete_model(sm, name)
 
 
 def deploy_endpoint(sm, endpoint_name, model_name, instance_type, instance_count):
@@ -376,6 +526,15 @@ def deploy_endpoint(sm, endpoint_name, model_name, instance_type, instance_count
 
     endpoint_info = sm.describe_endpoint(EndpointName=endpoint_name)
     logger.info(f"Endpoint ready: {endpoint_info['EndpointStatus']}")
+
+    # Drop prior deploy Models/configs; only the live pair should remain.
+    logger.info("Cleaning up orphaned endpoint models/configs from prior deploys")
+    cleanup_orphaned_endpoint_resources(
+        sm,
+        endpoint_name=endpoint_name,
+        keep_model_name=model_name,
+        keep_config_name=endpoint_config_name,
+    )
     return endpoint_info
 
 
@@ -532,16 +691,17 @@ def main():
         model_version=model_version,
     )
 
-    # Always use image + ModelDataUrl so the custom inference.py is active.
-    # Staged overrides already required this path for cross-bucket reads.
-    create_sagemaker_model(
+    # Bind enriched artifact onto the package, then create Model from
+    # ModelPackageName so Studio shows this version as Deployed. Falls back to
+    # a detached image+URL Model if package bind/create is rejected.
+    created_from_package = create_sagemaker_model(
         sm,
         model_name,
         model_package_arn,
         args.image_uri,
         serving_model_data_url,
         args.execution_role_arn,
-        prefer_data_url=True,
+        model_package=model_package,
         model_version=model_version,
         use_realtime_inference_script=True,
     )
@@ -561,6 +721,7 @@ def main():
         "model_data_url": model_data_url,
         "serving_model_data_url": serving_model_data_url,
         "model_data_url_overridden": bool(data_url_override),
+        "created_from_model_package": created_from_package,
         "realtime_enrichment": True,
         "endpoint_name": args.endpoint_name,
         "endpoint_arn": endpoint_info.get("EndpointArn"),
