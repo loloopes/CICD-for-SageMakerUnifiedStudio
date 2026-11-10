@@ -217,8 +217,9 @@ def write_enriched_predictions(
     ``table_uri`` is a stable S3 prefix (e.g. .../evaluation/predictions_enriched)
     so successive evaluate / batch runs accumulate rows instead of overwriting.
 
-    ``features`` is stored as a JSON array string so schema stays stable across
-    appends (matches realtime ``inference.py`` payload shape).
+    ``features`` is a JSON object string (named map) matching realtime
+    ``inference.py``. Appends use ``schema_mode=merge`` so older 4-column
+    tables evolve when the ``features`` column is introduced.
 
     Converts via PyArrow explicitly — newer ``deltalake`` rejects raw pandas
     DataFrames in the sklearn processing image (Arrow C stream mismatch).
@@ -273,7 +274,24 @@ def write_enriched_predictions(
         }
     )
     uri = table_uri.rstrip("/")
-    write_deltalake(uri, pa.Table.from_pandas(df, preserve_index=False), mode="append")
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    try:
+        write_deltalake(uri, table, mode="append", schema_mode="merge")
+    except TypeError:
+        # Older deltalake without schema_mode — fall back to overwrite on mismatch.
+        try:
+            write_deltalake(uri, table, mode="append")
+        except Exception as append_exc:
+            logger.warning(
+                f"Delta append failed ({append_exc}); overwriting table with new schema"
+            )
+            write_deltalake(uri, table, mode="overwrite")
+    except Exception as append_exc:
+        # e.g. SchemaMismatchError when merge is unsupported for the change.
+        logger.warning(
+            f"Delta append/merge failed ({append_exc}); overwriting table with new schema"
+        )
+        write_deltalake(uri, table, mode="overwrite")
     logger.info(f"Appended {len(scores)} enriched predictions to Delta table {uri}")
     return uri
 
