@@ -18,7 +18,10 @@ drift_check_pipeline:
     data_drift_check:
       operator: airflow.providers.amazon.aws.operators.glue.GlueJobOperator
       retries: 0
-      job_name: stack-data-drift
+      # Per-project name so MaxConcurrentRuns is isolated across SMUS projects
+      # sharing an account/region. Do not append a run timestamp — that would
+      # create a new Glue job definition on every DAG run.
+      job_name: "stack-data-drift-{proj.name}"
       script_location: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/src/glue_data_drift_check.py"
       s3_bucket: "{proj.connection.default.s3_shared.bucket_name}"
       iam_role_name: "{proj.iam_role_name}"
