@@ -100,6 +100,9 @@ jobs:
           aws-region: ${{ vars.DOMAIN_REGION || 'us-east-2' }}
           role-session-name: smus-batch-inference
           role-chaining: true
+          # OIDC→datazone hop: GitHubActionsRole has sts:AssumeRole but not
+          # sts:TagSession on datazone_usr_role_*. Skip tags so chaining works.
+          role-skip-session-tagging: true
 
       - name: Run batch inference
         env:

@@ -97,13 +97,15 @@ fi
 
 # ── Step 3: Inline policy (AssumeRole only) ─────────────────────────────────
 echo "Step 3: Inline policy..."
+# Include sts:TagSession so role-chaining via configure-aws-credentials works
+# (that action tags sessions unless role-skip-session-tagging is set).
 ASSUME_POLICY=$(cat <<EOF
 {
   "Version": "2012-10-17",
   "Statement": [{
     "Sid": "AssumeProjectRole",
     "Effect": "Allow",
-    "Action": "sts:AssumeRole",
+    "Action": ["sts:AssumeRole", "sts:TagSession"],
     "Resource": [
       "arn:aws:iam::${ACCOUNT_ID}:role/datazone*",
       "arn:aws:iam::${ACCOUNT_ID}:role/${DEPLOYMENT_ROLE}",
