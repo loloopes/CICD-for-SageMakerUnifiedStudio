@@ -1,10 +1,11 @@
 # =============================================================================
 # Bank Mktg Training Pipeline - SageMaker Pipeline Pattern
 # =============================================================================
-# Flow: preprocess → train → evaluate → register
+# Flow: preprocess → train → evaluate → clarify + register → model_card
 # Dataset: UCI Bank Mktg (binary classification - term deposit subscription)
 #
-# Pattern: Data Pre-Processing → Train Model → Evaluate Model → Register Model
+# Pattern: Preprocess → Train → Evaluate → Clarify (bias/SHAP) + Register
+#          → Model Card (governance summary for Studio)
 # No endpoint deployment — focused on model development and registry.
 # =============================================================================
 
@@ -149,7 +150,56 @@ training_pipeline:
         StoppingCondition:
           MaxRuntimeInSeconds: 1800
 
-    # ---- 4. Register Model (SageMaker Model Registry) ----
+    # ---- 4. Clarify bias + SHAP (Processing → Clarify container) ----
+    clarify_analysis:
+      operator: airflow.providers.amazon.aws.operators.sagemaker.SageMakerProcessingOperator
+      retries: 0
+      dependencies: [evaluate_model]
+      wait_for_completion: true
+      print_log: true
+      config:
+        ProcessingJobName: 'stack-clarify-{{ ts_nodash }}'
+        ProcessingResources:
+          ClusterConfig:
+            InstanceCount: 1
+            InstanceType: ml.m5.large
+            VolumeSizeInGB: 20
+        AppSpecification:
+          ImageUri: "257758044811.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-scikit-learn:1.2-1"
+          ContainerEntrypoint: ["python3", "/opt/ml/processing/src/run_clarify.py"]
+          ContainerArguments:
+            - "--training-job-prefix"
+            - "stack-xgb"
+            - "--model-prefix"
+            - "stack-clarify"
+            - "--image-uri"
+            - "257758044811.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-xgboost:1.7-1"
+            - "--execution-role-arn"
+            - "{proj.iam_role_arn}"
+            - "--region"
+            - "{domain.region}"
+            - "--test-data-path"
+            - "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/data/bank_mktg/features/test/"
+            - "--output-path"
+            - "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/models/evaluation/"
+            - "--max-rows"
+            - "500"
+            - "--facet-column"
+            - "age"
+            - "--facet-threshold"
+            - "50"
+        ProcessingInputs:
+          - InputName: source
+            S3Input:
+              S3Uri: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/src/"
+              LocalPath: /opt/ml/processing/src
+              S3DataType: S3Prefix
+              S3InputMode: File
+        RoleArn: "{proj.iam_role_arn}"
+        StoppingCondition:
+          MaxRuntimeInSeconds: 4500
+
+    # ---- 5. Register Model (SageMaker Model Registry) ----
     register_model:
       operator: airflow.providers.amazon.aws.operators.sagemaker.SageMakerRegisterModelVersionOperator
       retries: 0
@@ -164,5 +214,42 @@ training_pipeline:
       # location of the job that actually ran.
       model_url: "{{ ti.xcom_pull(task_ids='train_model')['Training']['ModelArtifacts']['S3ModelArtifacts'] }}"
       package_group_name: "{env.MODEL_PACKAGE_GROUP}"
+
+    # ---- 6. Model Card (governance doc from eval + Clarify + registry) ----
+    create_model_card:
+      operator: airflow.providers.amazon.aws.operators.sagemaker.SageMakerProcessingOperator
+      retries: 0
+      dependencies: [register_model, clarify_analysis]
+      wait_for_completion: true
+      print_log: true
+      config:
+        ProcessingJobName: 'stack-modelcard-{{ ts_nodash }}'
+        ProcessingResources:
+          ClusterConfig:
+            InstanceCount: 1
+            InstanceType: ml.m5.large
+            VolumeSizeInGB: 10
+        AppSpecification:
+          ImageUri: "257758044811.dkr.ecr.{domain.region}.amazonaws.com/sagemaker-scikit-learn:1.2-1"
+          ContainerEntrypoint: ["python3", "/opt/ml/processing/src/create_model_card.py"]
+          ContainerArguments:
+            - "--region"
+            - "{domain.region}"
+            - "--evaluation-path"
+            - "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/models/evaluation/"
+            - "--model-package-group"
+            - "{env.MODEL_PACKAGE_GROUP}"
+            - "--model-card-name"
+            - "stack-bank-mktg-model-card"
+        ProcessingInputs:
+          - InputName: source
+            S3Input:
+              S3Uri: "{proj.connection.default.s3_shared.s3Uri}stack/mlops_pipeline/src/"
+              LocalPath: /opt/ml/processing/src
+              S3DataType: S3Prefix
+              S3InputMode: File
+        RoleArn: "{proj.iam_role_arn}"
+        StoppingCondition:
+          MaxRuntimeInSeconds: 900
 
 # end of workflow

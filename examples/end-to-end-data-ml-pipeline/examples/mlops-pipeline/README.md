@@ -14,7 +14,9 @@ Three workflows make up the MLOps flow:
 preprocess (GlueJobOperator)
   → train_model (SageMakerTrainingOperator)
     → evaluate_model (SageMakerProcessingOperator)
+      → clarify_analysis (bias + SHAP → …/evaluation/clarify/)
       → register_model (SageMakerRegisterModelVersionOperator → PendingManualApproval)
+        → create_model_card (stack-bank-mktg-model-card in Studio)
 ```
 
 **`deploy_pipeline`** — deploys the approved model to an endpoint (event-driven):
@@ -38,7 +40,9 @@ On **E2E Deploy MLOps Pipeline** (`workflow_dispatch`), `check_drift` (default o
 | `preprocess` | GlueJobOperator | Feature engineering from DataOps transformed data; snapshots raw `SOURCE_PATH` → `drift_reference/` |
 | `train_model` | SageMakerTrainingOperator | XGBoost training via `train_xgboost.py` (script mode) with MLflow tracking |
 | `evaluate_model` | SageMakerProcessingOperator | Batch evaluation on the held-out test set (`evaluate_model.py`) |
+| `clarify_analysis` | SageMakerProcessingOperator | SageMaker Clarify bias + SHAP (`run_clarify.py`); HTML/JSON under `…/evaluation/clarify/` |
 | `register_model` | SageMakerRegisterModelVersionOperator | Registers a version in `stack-prediction-models` as `PendingManualApproval` |
+| `create_model_card` | SageMakerProcessingOperator | Creates/updates Model Card `stack-bank-mktg-model-card` (`create_model_card.py`) |
 | `deploy_model` | SageMakerProcessingOperator | Creates/updates the prediction endpoint (`deploy_model.py`) |
 | `data_drift_check` | GlueJobOperator | PSI / share-delta: live source vs `drift_reference/`; writes `result.json` |
 

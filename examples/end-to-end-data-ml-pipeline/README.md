@@ -385,12 +385,12 @@ After these edits each stage authenticates to, and deploys into, its own account
 
 | File | Purpose |
 | ---- | ------- |
-| [`scripts/setup-mlops-infra.sh`](scripts/setup-mlops-infra.sh) | Event-driven deploy trigger (Lambda + EventBridge rule + IAM role) |
+| [`scripts/setup-mlops-infra.sh`](scripts/setup-mlops-infra.sh) | Event-driven deploy trigger (Lambda + EventBridge) + project `MlopsTraining` IAM (train/Clarify/Model Cards) |
 | [`scripts/setup-github-oidc.sh`](scripts/setup-github-oidc.sh) | GitHub OIDC provider + IAM role for CI/CD |
 
 ### Setting up the event-driven deploy trigger
 
-`setup-mlops-infra.sh` provisions the approval → deploy trigger (Lambda + EventBridge rule + IAM role) that fires the promote pipeline whenever a model is approved in the registry.
+`setup-mlops-infra.sh` provisions the approval → deploy trigger (Lambda + EventBridge rule + IAM role) that fires the promote pipeline whenever a model is approved in the registry, and attaches/updates the project role inline policy `MlopsTraining` (training, Clarify processing, Model Cards, PassRole, ECR, project S3).
 
 > In CI/CD this runs automatically — the MLOps training workflow provisions the trigger in `dev` (`setup_infra: true`), so only the Secrets Manager token (step 1) must exist beforehand. The steps below are for provisioning it manually, outside CI.
 

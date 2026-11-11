@@ -157,6 +157,29 @@ MLOPS_INFRA_POLICY=$(cat <<EOF
       "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/stack-airflow-deploy-trigger-role"
     },
     {
+      "Sid": "ProjectRoleMlopsTraining",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:ListRolePolicies"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/datazone_usr_role_*"
+    },
+    {
+      "Sid": "DataZoneResolveProjectRole",
+      "Effect": "Allow",
+      "Action": [
+        "datazone:ListDomains",
+        "datazone:ListProjects",
+        "datazone:ListEnvironments",
+        "datazone:GetEnvironment",
+        "datazone:GetProject"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "EventBridgeDeployTrigger",
       "Effect": "Allow",
       "Action": [

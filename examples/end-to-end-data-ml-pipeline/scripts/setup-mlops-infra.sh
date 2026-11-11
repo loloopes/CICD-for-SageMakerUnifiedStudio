@@ -21,6 +21,13 @@
 #
 # What it creates:
 #   1. Deploy Trigger (Lambda function, EventBridge rule, IAM role)
+#   2. Project role inline policy MlopsTraining (train/eval/Clarify/Model Cards/
+#      endpoint + PassRole + ECR + project S3 + logs)
+#
+# Optional env overrides:
+#   DOMAIN_ID                 DataZone domain id (else discovered by project name)
+#   PROJECT_USER_ROLE_ARN     Skip discovery; attach MlopsTraining to this role
+#   MLFLOW_TRACKING_SERVER_NAME  (default: smus-integration-mlflow-${REGION})
 #
 # Prerequisites:
 #   - AWS credentials for the target account
@@ -337,6 +344,223 @@ aws lambda add-permission \
 echo "  Lambda permission granted."
 
 # =============================================================================
+# PART 2: Project execution role — train / Clarify / Model Cards
+# =============================================================================
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Project role: Clarify + Model Cards (MlopsTraining)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+MLFLOW_TRACKING_SERVER_NAME="${MLFLOW_TRACKING_SERVER_NAME:-smus-integration-mlflow-${REGION}}"
+PROJECT_ROLE_ARN="${PROJECT_USER_ROLE_ARN:-}"
+PROJECT_ID=""
+S3_BUCKET=""
+S3_PROJECT_PREFIX=""
+
+if [[ -z "$PROJECT_ROLE_ARN" ]]; then
+  echo "[2.1] Resolving DataZone project '$PROJECT_NAME' userRoleArn..."
+  RESOLVE_OUT=$(python3 - "$REGION" "$PROJECT_NAME" "${DOMAIN_ID:-}" <<'PY'
+import json, sys
+import boto3
+
+region, project_name, domain_id = sys.argv[1], sys.argv[2], sys.argv[3] or None
+dz = boto3.client("datazone", region_name=region)
+
+def find_project(did: str):
+    token = None
+    while True:
+        kw = {"domainIdentifier": did, "maxResults": 50}
+        if token:
+            kw["nextToken"] = token
+        resp = dz.list_projects(**kw)
+        for p in resp.get("items") or []:
+            if p.get("name") == project_name:
+                return p.get("id")
+        token = resp.get("nextToken")
+        if not token:
+            return None
+
+if not domain_id:
+    for d in dz.list_domains().get("items") or []:
+        pid = find_project(d["id"])
+        if pid:
+            domain_id, project_id = d["id"], pid
+            break
+    else:
+        raise SystemExit(f"Project '{project_name}' not found in any domain in {region}")
+else:
+    project_id = find_project(domain_id)
+    if not project_id:
+        raise SystemExit(f"Project '{project_name}' not found in domain {domain_id}")
+
+role_arn = bucket = prefix = None
+for env in dz.list_environments(domainIdentifier=domain_id, projectIdentifier=project_id).get("items") or []:
+    detail = dz.get_environment(domainIdentifier=domain_id, identifier=env["id"])
+    resources = {r.get("name"): r.get("value") for r in detail.get("provisionedResources") or []}
+    role_arn = role_arn or resources.get("userRoleArn")
+    shared = resources.get("nonGitProjectRepositoryLocation") or resources.get("s3BucketPath")
+    if shared and shared.startswith("s3://") and not bucket:
+        # s3://bucket/dzd-…/projectId[/stage]  → scope policy to projectId/*
+        path = shared[len("s3://"):]
+        bucket, _, rest = path.partition("/")
+        parts = [p for p in rest.split("/") if p]
+        if len(parts) >= 2:
+            prefix = f"{parts[0]}/{parts[1]}"
+
+if not role_arn:
+    raise SystemExit(f"No userRoleArn for project '{project_name}' ({project_id})")
+if not bucket or not prefix:
+    raise SystemExit(f"Could not resolve project S3 location for '{project_name}'")
+
+print(json.dumps({
+    "domain_id": domain_id,
+    "project_id": project_id,
+    "role_arn": role_arn,
+    "s3_bucket": bucket,
+    "s3_prefix": prefix,
+}))
+PY
+)
+  PROJECT_ROLE_ARN=$(echo "$RESOLVE_OUT" | python3 -c "import json,sys; print(json.load(sys.stdin)['role_arn'])")
+  PROJECT_ID=$(echo "$RESOLVE_OUT" | python3 -c "import json,sys; print(json.load(sys.stdin)['project_id'])")
+  S3_BUCKET=$(echo "$RESOLVE_OUT" | python3 -c "import json,sys; print(json.load(sys.stdin)['s3_bucket'])")
+  S3_PROJECT_PREFIX=$(echo "$RESOLVE_OUT" | python3 -c "import json,sys; print(json.load(sys.stdin)['s3_prefix'])")
+  echo "  Domain/project : resolved ($PROJECT_ID)"
+  echo "  Role           : $PROJECT_ROLE_ARN"
+  echo "  S3             : s3://${S3_BUCKET}/${S3_PROJECT_PREFIX}/*"
+else
+  echo "[2.1] Using PROJECT_USER_ROLE_ARN=$PROJECT_ROLE_ARN"
+  if [[ -z "${PROJECT_S3_BUCKET:-}" || -z "${PROJECT_S3_PREFIX:-}" ]]; then
+    echo "ERROR: When PROJECT_USER_ROLE_ARN is set, also set PROJECT_S3_BUCKET and PROJECT_S3_PREFIX" >&2
+    exit 1
+  fi
+  S3_BUCKET="$PROJECT_S3_BUCKET"
+  S3_PROJECT_PREFIX="${PROJECT_S3_PREFIX%/}"
+fi
+
+PROJECT_ROLE_NAME="${PROJECT_ROLE_ARN##*/}"
+
+echo "[2.2] Attaching inline policy MlopsTraining to $PROJECT_ROLE_NAME..."
+MLOPS_TRAINING_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SageMakerTrainEvalRegister",
+      "Effect": "Allow",
+      "Action": [
+        "sagemaker:CreateTrainingJob",
+        "sagemaker:DescribeTrainingJob",
+        "sagemaker:StopTrainingJob",
+        "sagemaker:ListTrainingJobs",
+        "sagemaker:CreateProcessingJob",
+        "sagemaker:DescribeProcessingJob",
+        "sagemaker:StopProcessingJob",
+        "sagemaker:ListProcessingJobs",
+        "sagemaker:CreateModel",
+        "sagemaker:DescribeModel",
+        "sagemaker:DeleteModel",
+        "sagemaker:ListModels",
+        "sagemaker:CreateTransformJob",
+        "sagemaker:DescribeTransformJob",
+        "sagemaker:StopTransformJob",
+        "sagemaker:CreateModelPackage",
+        "sagemaker:DescribeModelPackage",
+        "sagemaker:UpdateModelPackage",
+        "sagemaker:ListModelPackages",
+        "sagemaker:CreateModelPackageGroup",
+        "sagemaker:DescribeModelPackageGroup",
+        "sagemaker:ListModelPackageGroups",
+        "sagemaker:CreateModelCard",
+        "sagemaker:UpdateModelCard",
+        "sagemaker:DescribeModelCard",
+        "sagemaker:DeleteModelCard",
+        "sagemaker:ListModelCards",
+        "sagemaker:ListModelCardVersions",
+        "sagemaker:CreateModelCardExportJob",
+        "sagemaker:DescribeModelCardExportJob",
+        "sagemaker:ListModelCardExportJobs",
+        "sagemaker:AddTags",
+        "sagemaker:ListTags",
+        "sagemaker:DeleteTags",
+        "sagemaker:CreatePresignedMlflowTrackingServerUrl",
+        "sagemaker:CreateEndpoint",
+        "sagemaker:DescribeEndpoint",
+        "sagemaker:UpdateEndpoint",
+        "sagemaker:DeleteEndpoint",
+        "sagemaker:CreateEndpointConfig",
+        "sagemaker:DescribeEndpointConfig",
+        "sagemaker:DeleteEndpointConfig",
+        "sagemaker:ListEndpoints",
+        "sagemaker:ListEndpointConfigs",
+        "sagemaker:InvokeEndpoint"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "MlflowTracking",
+      "Effect": "Allow",
+      "Action": "sagemaker-mlflow:*",
+      "Resource": "arn:aws:sagemaker:${REGION}:${ACCOUNT_ID}:mlflow-tracking-server/${MLFLOW_TRACKING_SERVER_NAME}"
+    },
+    {
+      "Sid": "ProjectBucket",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::${S3_BUCKET}/${S3_PROJECT_PREFIX}/*"
+    },
+    {
+      "Sid": "ProjectBucketList",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::${S3_BUCKET}",
+      "Condition": {
+        "StringLike": {"s3:prefix": "${S3_PROJECT_PREFIX}/*"}
+      }
+    },
+    {
+      "Sid": "PullTrainingAndClarifyImages",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SageMakerLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/sagemaker/*"
+    },
+    {
+      "Sid": "PassRoleToSageMaker",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "${PROJECT_ROLE_ARN}",
+      "Condition": {
+        "StringEquals": {"iam:PassedToService": "sagemaker.amazonaws.com"}
+      }
+    }
+  ]
+}
+EOF
+)
+
+aws iam put-role-policy \
+  --role-name "$PROJECT_ROLE_NAME" \
+  --policy-name "MlopsTraining" \
+  --policy-document "$MLOPS_TRAINING_POLICY"
+echo "  MlopsTraining attached (train/eval/Clarify/Model Cards/PassRole/ECR)."
+
+# =============================================================================
 # SUMMARY
 # =============================================================================
 echo ""
@@ -350,6 +574,10 @@ echo "║    Lambda:    $FUNCTION_NAME"
 echo "║    Role:      $LAMBDA_ROLE_NAME"
 echo "║    Model grp: $MODEL_PACKAGE_GROUP"
 echo "║    GitHub:    $GITHUB_REPO"
+echo "║                                                          ║"
+echo "║  Project role (MlopsTraining)                            ║"
+echo "║    Role:      $PROJECT_ROLE_NAME"
+echo "║    Includes:  Clarify processing + Model Cards           ║"
 echo "║                                                          ║"
 echo "║  Flow:                                                   ║"
 echo "║    Model approved → EventBridge → Lambda                 ║"
