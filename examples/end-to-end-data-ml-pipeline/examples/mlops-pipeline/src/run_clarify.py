@@ -445,7 +445,10 @@ def main() -> int:
         Body=json.dumps(summary, indent=2),
         ContentType="application/json",
     )
-    latest_key = _parse_s3(out_root + "/clarify/latest/clarify_summary.json")[1]
+    # File key — do not use _parse_s3 (it forces a trailing slash for prefixes).
+    latest_key = (
+        urlparse(out_root.rstrip("/") + "/clarify/latest/clarify_summary.json").path.lstrip("/")
+    )
     s3.put_object(
         Bucket=out_bucket,
         Key=latest_key,

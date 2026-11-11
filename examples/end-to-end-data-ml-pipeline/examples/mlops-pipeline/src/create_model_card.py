@@ -72,15 +72,21 @@ def load_latest_evaluation(s3, eval_uri: str) -> dict:
 
 
 def load_clarify_summary(s3, eval_uri: str) -> dict | None:
-    bucket, prefix = _parse_s3(eval_uri.rstrip("/") + "/clarify/latest/")
-    key = prefix.rstrip("/") + "/clarify_summary.json"
-    try:
-        body = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
-        summary = json.loads(body)
-        summary["_s3_uri"] = f"s3://{bucket}/{key}"
-        return summary
-    except s3.exceptions.ClientError:
-        return None
+    bucket, prefix = _parse_s3(eval_uri)
+    # Prefer stable pointer; also try common trailing-slash key mistake from older runs.
+    candidates = [
+        prefix.rstrip("/") + "/clarify/latest/clarify_summary.json",
+        prefix.rstrip("/") + "/clarify/latest/clarify_summary.json/",
+    ]
+    for key in candidates:
+        try:
+            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
+            summary = json.loads(body)
+            summary["_s3_uri"] = f"s3://{bucket}/{key.rstrip('/')}"
+            return summary
+        except s3.exceptions.ClientError:
+            continue
+    return None
 
 
 def latest_package(sm, group: str) -> dict | None:
@@ -132,6 +138,18 @@ def build_card_content(eval_report: dict, clarify: dict | None, pkg: dict | None
             f"v{pkg.get('ModelPackageVersion')} ({pkg.get('ModelPackageArn')})."
         )
 
+    # SageMaker Model Card schema requires model_overview.model_version to be a
+    # number (registry package version). Training-job name strings go in notes.
+    numeric_version = 0.0
+    if pkg and isinstance(pkg.get("ModelPackageVersion"), (int, float)):
+        numeric_version = float(pkg["ModelPackageVersion"])
+    else:
+        raw = eval_report.get("model_version")
+        try:
+            numeric_version = float(raw)
+        except (TypeError, ValueError):
+            numeric_version = 0.0
+
     content = {
         "model_overview": {
             "model_description": (
@@ -144,7 +162,7 @@ def build_card_content(eval_report: dict, clarify: dict | None, pkg: dict | None
             "model_creator": "stack-mlops-training-pipeline",
             "model_owner": "e2e-data-stack-ml-ops",
             "model_name": eval_report.get("model_name", "stack-model"),
-            "model_version": str(eval_report.get("model_version", "unknown")),
+            "model_version": numeric_version,
         },
         "intended_uses": {
             "purpose_of_model": (
