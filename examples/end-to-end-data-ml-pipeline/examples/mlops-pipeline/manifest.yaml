@@ -68,8 +68,9 @@ stages:
     environment_variables:
       ENDPOINT_NAME: stack-prediction-dev
       ATHENA_DB_NAME: ${ATHENA_DB_NAME:stack_bank_mktg_dev}
-      # Prefer region-suffixed server (smus-direct-deploy creates smus-integration-mlflow-${REGION}).
-      MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-2}"
+      # Project-native SMUS MLflow server (override via MLFLOW_TRACKING_SERVER_NAME).
+      # smus-direct-deploy can also create smus-integration-mlflow-${REGION}.
+      MLFLOW_TRACKING_SERVER_NAME: "${MLFLOW_TRACKING_SERVER_NAME:tracking-server-6d3pq5vm70uxm1-bogfarv8rf6a3t-dev}"
       MODEL_PACKAGE_GROUP: "${MODEL_PACKAGE_GROUP:stack-prediction-models}"
       MODEL_PACKAGE_ARN: "${MODEL_PACKAGE_ARN:none}"
       MODEL_DATA_URL_OVERRIDE: "${MODEL_DATA_URL_OVERRIDE:none}"
@@ -82,8 +83,8 @@ stages:
           name: mlflow-tracking
           connection_type: MLFLOW
           properties:
-            trackingServerArn: "arn:aws:sagemaker:${DEV_DOMAIN_REGION}:${AWS_ACCOUNT_ID}:mlflow-tracking-server/${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-2}"
-            trackingServerName: "${MLFLOW_TRACKING_SERVER_NAME:smus-integration-mlflow-us-east-2}"
+            trackingServerArn: "arn:aws:sagemaker:${DEV_DOMAIN_REGION}:${AWS_ACCOUNT_ID}:mlflow-tracking-server/${MLFLOW_TRACKING_SERVER_NAME:tracking-server-6d3pq5vm70uxm1-bogfarv8rf6a3t-dev}"
+            trackingServerName: "${MLFLOW_TRACKING_SERVER_NAME:tracking-server-6d3pq5vm70uxm1-bogfarv8rf6a3t-dev}"
         - type: workflow.create
           workflowName: training_pipeline
         - type: workflow.create

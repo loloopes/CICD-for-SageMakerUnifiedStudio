@@ -23,15 +23,74 @@ import argparse
 import json
 import logging
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import boto3
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
+from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("create_model_card")
 
 CARD_NAME = "stack-bank-mktg-model-card"
+
+
+def _sagemaker_json_call(sm, operation: str, params: dict) -> dict:
+    """Call a SageMaker JSON API op, bypassing local botocore shape validation.
+
+    The sklearn processing image ships an old botocore that rejects
+    ``UpdateModelPackage(ModelCard=…)`` client-side even though the service
+    accepts it. Signing a raw ``x-amz-json-1.1`` request avoids that.
+    """
+    credentials = sm._request_signer._credentials
+    if credentials is None:
+        raise RuntimeError("No AWS credentials available for SageMaker JSON call")
+    frozen = credentials.get_frozen_credentials()
+    body = json.dumps(params)
+    headers = {
+        "Content-Type": "application/x-amz-json-1.1",
+        "X-Amz-Target": f"SageMaker.{operation}",
+    }
+    request = AWSRequest(
+        method="POST",
+        url=sm.meta.endpoint_url,
+        data=body,
+        headers=headers,
+    )
+    SigV4Auth(frozen, "sagemaker", sm.meta.region_name).add_auth(request)
+    prepared = request.prepare()
+    req = urllib.request.Request(
+        prepared.url,
+        data=prepared.body,
+        headers=dict(prepared.headers),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"SageMaker.{operation} HTTP {e.code}: {err_body}") from e
+
+
+def update_model_package_compat(sm, **params):
+    """``update_model_package`` that works on old processing-image botocore."""
+    try:
+        return sm.update_model_package(**params)
+    except ParamValidationError as e:
+        if "ModelCard" not in str(e):
+            raise
+        logger.warning(
+            "Local botocore rejects ModelCard on UpdateModelPackage (%s); "
+            "retrying via raw SageMaker JSON API",
+            e,
+        )
+        return _sagemaker_json_call(sm, "UpdateModelPackage", params)
 
 
 def parse_args():
@@ -51,6 +110,11 @@ def _parse_s3(uri: str) -> tuple[str, str]:
 def _clip(s: str | None, n: int) -> str:
     s = "" if s is None else str(s)
     return s if len(s) <= n else s[: n - 3] + "..."
+
+
+def _nonempty_details(d: dict) -> dict:
+    """Drop empty custom_details values (package schema is picky)."""
+    return {k: v for k, v in d.items() if isinstance(v, str) and v.strip()}
 
 
 def _list_keys(s3, bucket: str, prefix: str) -> list[str]:
@@ -317,11 +381,6 @@ def build_standalone_card_content(
     return json.dumps(content)
 
 
-def _nonempty_details(d: dict) -> dict:
-    """Drop empty custom_details values (package schema is picky)."""
-    return {k: v for k, v in d.items() if isinstance(v, str) and v.strip()}
-
-
 def build_package_card_content(
     eval_report: dict,
     clarify: dict | None,
@@ -427,9 +486,10 @@ def attach_package_card(sm, pkg: dict, package_content: str, clarify: dict | Non
         meta["clarify_report_html"] = _clip(report, 256)
         meta["clarify_engine"] = _clip(str(clarify.get("engine", "local")), 256)
 
-    # 1) ModelCard only (most common failure is Content schema).
+    # 1) ModelCard only (most common failure is Content schema / old botocore).
     try:
-        sm.update_model_package(
+        update_model_package_compat(
+            sm,
             ModelPackageArn=arn,
             ModelCard={
                 "ModelCardContent": package_content,
@@ -437,7 +497,7 @@ def attach_package_card(sm, pkg: dict, package_content: str, clarify: dict | Non
             },
         )
         logger.info("Attached ModelCard to package %s", arn)
-    except sm.exceptions.ClientError as e:
+    except (ClientError, BotoCoreError, RuntimeError, ParamValidationError) as e:
         logger.error("update_model_package(ModelCard=…) failed: %s", e)
         # 2) Retry with a bare-minimum card (metrics + intended uses only).
         minimal = {
@@ -456,7 +516,8 @@ def attach_package_card(sm, pkg: dict, package_content: str, clarify: dict | Non
             or [],
         }
         logger.info("Retrying package ModelCard with minimal content")
-        sm.update_model_package(
+        update_model_package_compat(
+            sm,
             ModelPackageArn=arn,
             ModelCard={
                 "ModelCardContent": json.dumps(minimal),
@@ -469,7 +530,7 @@ def attach_package_card(sm, pkg: dict, package_content: str, clarify: dict | Non
     try:
         sm.update_model_package(ModelPackageArn=arn, CustomerMetadataProperties=meta)
         logger.info("Attached CustomerMetadataProperties to package %s", arn)
-    except sm.exceptions.ClientError as e:
+    except ClientError as e:
         logger.warning("CustomerMetadataProperties update failed (non-fatal): %s", e)
 
 
@@ -485,7 +546,8 @@ def upsert_standalone_card(sm, name: str, content: str) -> None:
             and "does not exist" not in msg.lower()
             and "ResourceNotFound" not in msg
         ):
-            raise
+            # Treat permission / other describe errors as "does not exist" and try create.
+            logger.warning("describe_model_card(%s) failed (%s); will try create", name, e)
 
     if exists:
         sm.update_model_card(
@@ -508,76 +570,86 @@ def upsert_standalone_card(sm, name: str, content: str) -> None:
 
 
 def main() -> int:
+    """Always exit 0 after best-effort writes so training_pipeline is not blocked."""
     args = parse_args()
-    sm = boto3.client("sagemaker", region_name=args.region)
-    s3 = boto3.client("s3", region_name=args.region)
-
-    eval_report = load_latest_evaluation(s3, args.evaluation_path)
-    clarify = load_clarify_summary(s3, args.evaluation_path)
-    analysis = load_clarify_analysis(s3, clarify)
-    pkg = latest_package(sm, args.model_package_group)
-
-    standalone = build_standalone_card_content(eval_report, clarify, analysis, pkg)
-    package_content = build_package_card_content(eval_report, clarify, analysis)
-
-    logger.info("Evaluation : %s", eval_report.get("_s3_uri"))
-    logger.info("Clarify    : %s", (clarify or {}).get("_s3_uri", "none"))
-    logger.info("Analysis   : %s", "yes" if analysis else "none")
-    logger.info("Package    : %s", (pkg or {}).get("ModelPackageArn", "none"))
-    logger.info("Model card : %s", args.model_card_name)
-
-    package_ok = False
-    standalone_ok = False
-
-    # 1) Attach to registry version — this is what Studio Models UI shows.
-    if pkg and pkg.get("ModelPackageArn"):
-        try:
-            attach_package_card(sm, pkg, package_content, clarify)
-            package_ok = True
-        except sm.exceptions.ClientError as e:
-            logger.error("Package ModelCard attach failed after retries: %s", e)
-    else:
-        logger.warning("No model package found; skipping package ModelCard attach")
-
-    # 2) Standalone card (Governance list / export).
     try:
-        upsert_standalone_card(sm, args.model_card_name, standalone)
-        standalone_ok = True
-    except sm.exceptions.ClientError as e:
-        logger.warning("Standalone Model Card upsert failed: %s", e)
+        sm = boto3.client("sagemaker", region_name=args.region)
+        s3 = boto3.client("s3", region_name=args.region)
 
-    # Persist card snapshot next to evaluation artifacts (even on partial success).
-    bucket, prefix = _parse_s3(args.evaluation_path)
-    snap_key = prefix.rstrip("/") + f"/model_cards/{args.model_card_name}.json"
-    s3.put_object(
-        Bucket=bucket,
-        Key=snap_key,
-        Body=json.dumps(
-            {
-                "model_card_name": args.model_card_name,
-                "status": "Draft",
-                "package_ok": package_ok,
-                "standalone_ok": standalone_ok,
-                "package_arn": (pkg or {}).get("ModelPackageArn"),
-                "package_content": json.loads(package_content),
-                "standalone_content": json.loads(standalone),
-            },
-            indent=2,
-        ),
-        ContentType="application/json",
-    )
-    logger.info("Snapshot s3://%s/%s", bucket, snap_key)
-    logger.info(
-        "Studio: Models → Registered models → %s → version → Evaluate/Audit "
-        "(package Model Card). Clarify HTML: …/models/evaluation/clarify/*/report.html",
-        args.model_package_group,
-    )
+        eval_report = load_latest_evaluation(s3, args.evaluation_path)
+        clarify = load_clarify_summary(s3, args.evaluation_path)
+        analysis = load_clarify_analysis(s3, clarify)
+        pkg = latest_package(sm, args.model_package_group)
 
-    if not package_ok and not standalone_ok:
-        logger.error("Both package and standalone Model Card writes failed")
-        return 1
-    if not package_ok:
-        logger.warning("Package Model Card missing; standalone/snapshot still written")
+        standalone = build_standalone_card_content(eval_report, clarify, analysis, pkg)
+        package_content = build_package_card_content(eval_report, clarify, analysis)
+
+        logger.info("Evaluation : %s", eval_report.get("_s3_uri"))
+        logger.info("Clarify    : %s", (clarify or {}).get("_s3_uri", "none"))
+        logger.info("Analysis   : %s", "yes" if analysis else "none")
+        logger.info("Package    : %s", (pkg or {}).get("ModelPackageArn", "none"))
+        logger.info("Model card : %s", args.model_card_name)
+
+        package_ok = False
+        standalone_ok = False
+
+        # 1) Attach to registry version — this is what Studio Models UI shows.
+        if pkg and pkg.get("ModelPackageArn"):
+            try:
+                attach_package_card(sm, pkg, package_content, clarify)
+                package_ok = True
+            except Exception as e:  # noqa: BLE001
+                logger.error("Package ModelCard attach failed after retries: %s", e)
+        else:
+            logger.warning("No model package found; skipping package ModelCard attach")
+
+        # 2) Standalone card (Governance list / export).
+        try:
+            upsert_standalone_card(sm, args.model_card_name, standalone)
+            standalone_ok = True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Standalone Model Card upsert failed: %s", e)
+
+        # Persist card snapshot next to evaluation artifacts (even on partial success).
+        try:
+            bucket, prefix = _parse_s3(args.evaluation_path)
+            snap_key = prefix.rstrip("/") + f"/model_cards/{args.model_card_name}.json"
+            s3.put_object(
+                Bucket=bucket,
+                Key=snap_key,
+                Body=json.dumps(
+                    {
+                        "model_card_name": args.model_card_name,
+                        "status": "Draft",
+                        "package_ok": package_ok,
+                        "standalone_ok": standalone_ok,
+                        "package_arn": (pkg or {}).get("ModelPackageArn"),
+                        "package_content": json.loads(package_content),
+                        "standalone_content": json.loads(standalone),
+                    },
+                    indent=2,
+                ),
+                ContentType="application/json",
+            )
+            logger.info("Snapshot s3://%s/%s", bucket, snap_key)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not write model card snapshot: %s", e)
+
+        logger.info(
+            "Studio: Models → Registered models → %s → version → Evaluate/Audit "
+            "(package Model Card). Clarify HTML: …/models/evaluation/clarify/*/report.html",
+            args.model_package_group,
+        )
+        if not package_ok and not standalone_ok:
+            logger.error(
+                "Both package and standalone Model Card writes failed — "
+                "training_pipeline continues; fix IAM/schema and re-run create_model_card"
+            )
+        elif not package_ok:
+            logger.warning("Package Model Card missing; standalone/snapshot still written")
+    except Exception as e:  # noqa: BLE001
+        # Never fail the DAG for model-card issues (model already registered upstream).
+        logger.exception("create_model_card aborted with error (non-fatal): %s", e)
     return 0
 
 
