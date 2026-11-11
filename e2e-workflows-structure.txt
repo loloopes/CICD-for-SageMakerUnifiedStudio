@@ -1,0 +1,191 @@
+# =============================================================================
+# Full-capacity file structure for:
+#   e2e-dataops-pipeline.yml
+#   e2e-mlops-pipeline.yml
+#   e2e-mlops-promote.yml
+#   e2e-mlops-batch-inference.yml
+#
+# “Full capacity” = every perk those workflows can turn on:
+#   DataOps refresh → MLOps deploy + EventBridge infra + MLflow + drift gate
+#   → training (Clarify + Model Card + register) → promote dev→test→prod
+#   (issue approvals + smoke) → weekly/on-demand batch inference all stages
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1) Entry workflows (the four you run)
+# ---------------------------------------------------------------------------
+.github/workflows/
+├── e2e-dataops-pipeline.yml          # deploy DataOps + run data_pipeline
+├── e2e-mlops-pipeline.yml            # deploy MLOps + infra + drift + train
+├── e2e-mlops-promote.yml             # model-approved / manual promote cascade
+└── e2e-mlops-batch-inference.yml     # Batch Transform vs live endpoint
+
+# ---------------------------------------------------------------------------
+# 2) Supporting workflows (required for full capacity — do not omit)
+# ---------------------------------------------------------------------------
+.github/workflows/
+├── smus-direct-deploy.yml            # reusable deploy (dataops + mlops call it)
+└── e2e-mlops-train.yml               # training_pipeline job (called by mlops
+                                      # when check_drift finds drift OR
+                                      # run_training=true)
+
+# ---------------------------------------------------------------------------
+# 3) CLI package (every workflow: pip install -e .)
+# ---------------------------------------------------------------------------
+pyproject.toml
+setup.py                              # present in repo
+setup.cfg                             # present in repo
+LICENSE
+README.md
+src/smus_cicd/                        # aws-smus-cicd-cli (entire package)
+├── cli.py
+├── __init__.py
+├── resource_types.py
+├── application/                      # manifest schema + validation
+├── bootstrap/                        # create env/connection/workflow
+├── commands/                         # deploy, run, monitor, describe, …
+├── helpers/                          # datazone, s3, airflow_serverless, …
+├── workflows/
+├── mcp/
+└── resources/                        # IAM trust/pass-role JSON, mcp-config
+
+# ---------------------------------------------------------------------------
+# 4) E2E example tree
+# ---------------------------------------------------------------------------
+examples/end-to-end-data-ml-pipeline/
+├── README.md                         # operator guide + gh workflow run docs
+│
+├── scripts/                          # GHA helpers (one-time + runtime)
+│   ├── setup-github-oidc.sh          # OIDC roles + GitHub Environments/secrets
+│   ├── setup-mlops-infra.sh          # EventBridge + Lambda model-approved → GHA
+│   ├── mlops_helper.py               # select/stage package, drift, smoke,
+│   │                                 # batch context, deploy status, logs
+│   ├── await_issue_approval.sh       # promote TEST/PROD human gates
+│   ├── batch_inference_smoke.py      # Batch Transform smoke (all stages)
+│   └── test-deploy-trigger-event.json
+│
+├── examples/dataops-pipeline/        # e2e-dataops MANIFEST_DIR + path filter
+│   ├── README.md
+│   ├── manifest.yaml
+│   ├── data/
+│   │   └── stack-sample.csv          # source; push under this tree triggers GHA
+│   ├── workflows/
+│   │   └── data_pipeline.yaml        # ingest → transform → DQ → Athena
+│   └── src/
+│       ├── glue-jobs/
+│       │   ├── glue_ingest_raw_data.py
+│       │   ├── glue_transform_aggregate.py
+│       │   └── glue_data_quality_checks.py
+│       └── notebooks/
+│           └── validate_dataops.ipynb
+│
+└── examples/mlops-pipeline/          # e2e-mlops + promote MANIFEST_DIR
+    ├── README.md
+    ├── manifest.yaml                 # targets: dev / test / prod
+    ├── workflows/
+    │   ├── training_pipeline.yaml    # preprocess→train→eval→clarify∥register
+    │   │                             # →model_card  (full train perk)
+    │   ├── deploy_pipeline.yaml      # endpoint deploy (promote WORKFLOW_NAME)
+    │   └── drift_check_pipeline.yaml # PSI gate before train
+    └── src/
+        ├── feature_engineering.py    # Glue preprocess + drift_reference
+        ├── glue_data_drift_check.py  # Glue drift job
+        ├── train_xgboost.py          # SageMaker script-mode + MLflow
+        ├── requirements.txt          # training container deps
+        ├── evaluate_model.py         # batch eval + metrics / enriched preds
+        ├── run_clarify.py            # bias + SHAP (Clarify replacement)
+        ├── create_model_card.py      # package Model Card + standalone card
+        ├── deploy_model.py           # endpoint create/update + cleanup
+        ├── inference.py              # realtime enrichment for InvokeEndpoint
+        ├── feature_schema.py         # shared feature column order
+        └── notebooks/
+            ├── evaluate_model.ipynb
+            └── validate_mlops.ipynb
+
+# ---------------------------------------------------------------------------
+# 5) What each entry workflow uses (full capacity)
+# ---------------------------------------------------------------------------
+# e2e-dataops-pipeline.yml
+#   → smus-direct-deploy.yml
+#   → dataops-pipeline/** + src/smus_cicd
+#   → run data_pipeline (refresh transformed/ + Athena)
+#
+# e2e-mlops-pipeline.yml
+#   → setup-mlops-infra.sh            (EventBridge/Lambda approve trigger)
+#   → smus-direct-deploy.yml          (dev→test→prod, setup_mlflow=true)
+#   → drift_check_pipeline            (check_drift=true)
+#   → e2e-mlops-train.yml             (on drift OR run_training=true)
+#       → training_pipeline           (Clarify + Model Card + register)
+#
+# e2e-mlops-promote.yml
+#   → mlops_helper.py (select + stage artifacts)
+#   → await_issue_approval.sh         (TEST + PROD gates; Issues enabled)
+#   → deploy_pipeline per stage + smoke-test + package metadata
+#   ← also triggered by repository_dispatch: model-approved
+#
+# e2e-mlops-batch-inference.yml
+#   → mlops_helper.py resolve-batch-context
+#   → batch_inference_smoke.py        (dev/test/prod endpoints)
+#   → schedule via BATCH_INFERENCE_CRON (mirror cron in YAML)
+
+# ---------------------------------------------------------------------------
+# 6) GitHub Environments / secrets / vars (full capacity)
+# ---------------------------------------------------------------------------
+# Environments (required):
+#   dev-aws-account
+#   test-aws-account
+#   prod-aws-account
+#
+# Secrets (required):
+#   AWS_ROLE_ARN_DEV
+#   AWS_ROLE_ARN_TEST                 # promote + batch at full multi-stage
+#   AWS_ROLE_ARN_PROD
+#   PROJECT_OWNER_ARN
+#
+# Vars — set these for full capacity (defaults exist but production use sets them):
+#   DOMAIN_REGION                     # required in practice
+#   DEV_PROJECT_NAME                  # e2e-data-stack-ml-ops-dev
+#   TEST_PROJECT_NAME                 # e2e-data-stack-ml-ops-test
+#   PROD_PROJECT_NAME                 # e2e-data-stack-ml-ops-prod
+#   DOMAIN_TAG_PURPOSE                # domain discovery for stage-artifact / batch
+#   ATHENA_DB_NAME                    # dataops Athena DB
+#   MODEL_PACKAGE_GROUP               # stack-prediction-models
+#   MLFLOW_TRACKING_SERVER_NAME       # smus-direct-deploy setup_mlflow
+#   MLFLOW_TRACKING_SERVER_ARN        # optional explicit ARN
+#   DEPLOY_TRIGGER_FUNCTION_NAME      # stack-airflow-deploy-trigger
+#   DEPLOY_TRIGGER_RULE_NAME          # stack-model-approved
+#   DEPLOY_TRIGGER_ROLE_NAME          # stack-airflow-deploy-trigger-role
+#   BATCH_INFERENCE_CRON              # e.g. '0 14 * * 1' (keep YAML cron in sync)
+#   BATCH_SHARED_S3_URI               # optional override
+#   BATCH_FEATURES_SHARED_S3_URI      # optional override (cross-stage features)
+#   PROJECT_EXECUTION_ROLE_ARN        # optional batch override
+#
+# Repo settings:
+#   Issues ENABLED                    # promote approval gates
+#   Actions OIDC trust via setup-github-oidc.sh (one-time)
+
+# ---------------------------------------------------------------------------
+# 7) Full-capacity manual runs (happy path)
+# ---------------------------------------------------------------------------
+# 1) Refresh data
+#    gh workflow run e2e-dataops-pipeline.yml --ref main \
+#      -f run_pipeline=true
+#
+# 2) Deploy MLOps everywhere + infra + drift + train if drifted
+#    gh workflow run e2e-mlops-pipeline.yml --ref main \
+#      -f stages=all \
+#      -f setup_infra=true \
+#      -f check_drift=true \
+#      -f run_training=false
+#    # force train regardless of drift:
+#    #  -f check_drift=false -f run_training=true
+#
+# 3) After registry approval (or manually):
+#    gh workflow run e2e-mlops-promote.yml --ref main \
+#      -f start_at=dev \
+#      -f run_smoke_test=true
+#    # (or wait for repository_dispatch model-approved from Lambda)
+#
+# 4) Batch score any stage
+#    gh workflow run e2e-mlops-batch-inference.yml --ref main \
+#      -f stage=prod -f split=test -f max_rows=0
