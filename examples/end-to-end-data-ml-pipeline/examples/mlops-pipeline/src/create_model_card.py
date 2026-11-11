@@ -118,8 +118,9 @@ def build_card_content(eval_report: dict, clarify: dict | None, pkg: dict | None
     clarify_note = "Clarify not run for this cycle."
     if clarify:
         clarify_note = (
-            f"Clarify bias+SHAP report at {clarify.get('report_html')} "
-            f"(facet {clarify.get('facet_column')} >= {clarify.get('facet_threshold')}; "
+            f"Bias+explainability report at {clarify.get('report_html')} "
+            f"(engine={clarify.get('engine', 'clarify')}; "
+            f"facet {clarify.get('facet_column')} >= {clarify.get('facet_threshold')}; "
             f"sample_rows={clarify.get('sample_rows')}). "
             f"Open report.html in project Files/S3 to review."
         )

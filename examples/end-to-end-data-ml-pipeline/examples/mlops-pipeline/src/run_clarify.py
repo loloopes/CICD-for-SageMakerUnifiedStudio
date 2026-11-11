@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Run SageMaker Clarify (bias + SHAP) for the latest stack-xgb model.
+"""Bias + explainability for the latest stack-xgb model (Clarify replacement).
 
-Creates an ephemeral SageMaker Model from the latest completed training job,
-builds a headered sample of the test CSV, launches a Clarify processing job,
-writes reports under ``…/models/evaluation/clarify/``, then deletes the Model.
+SageMaker Clarify processing is closed to new accounts (maintenance mode as of
+2026-07-30). This script follows AWS guidance: compute the same standardized
+bias metrics with pandas/numpy and feature attribution with SHAP (or XGBoost
+gain as fallback), inside a normal Processing job.
 
-Demo facet: continuous ``age`` with threshold 50 (older vs younger). This is
-illustrative for the bank-marketing schema — replace with real protected
+Writes under ``…/models/evaluation/clarify/``:
+  - analysis.json
+  - report.html
+  - clarify_summary.json (+ ``clarify/latest/`` pointer)
+
+Demo facet: continuous ``age`` with threshold 50. Replace with real protected
 attributes for production fairness work.
 
 Invoked as a SageMaker Processing job from ``training_pipeline``.
@@ -15,10 +20,15 @@ Invoked as a SageMaker Processing job from ``training_pipeline``.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import logging
+import os
+import subprocess
 import sys
-import time
+import tarfile
+import tempfile
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import boto3
@@ -26,38 +36,46 @@ import boto3
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("run_clarify")
 
-# Account-mapped Clarify processing images (SageMaker Clarify 1.0).
-CLARIFY_IMAGE = {
-    "us-east-1": "205492490401.dkr.ecr.us-east-1.amazonaws.com/sagemaker-clarify-processing:1.0",
-    "us-east-2": "211330385726.dkr.ecr.us-east-2.amazonaws.com/sagemaker-clarify-processing:1.0",
-    "us-west-2": "263288472518.dkr.ecr.us-west-2.amazonaws.com/sagemaker-clarify-processing:1.0",
-    "eu-west-1": "430846316453.dkr.ecr.eu-west-1.amazonaws.com/sagemaker-clarify-processing:1.0",
-}
-
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--training-job-prefix", default="stack-xgb")
     p.add_argument("--model-prefix", default="stack-clarify")
-    p.add_argument("--image-uri", required=True, help="XGBoost inference image for ephemeral Model")
-    p.add_argument("--execution-role-arn", required=True)
+    # Kept for YAML compatibility; unused after Clarify container retirement.
+    p.add_argument("--image-uri", default="", help="Unused (legacy Clarify Model image)")
+    p.add_argument("--execution-role-arn", default="", help="Unused (legacy PassRole)")
     p.add_argument("--region", required=True)
     p.add_argument("--test-data-path", required=True, help="S3 prefix with label+feature CSVs")
     p.add_argument("--output-path", required=True, help="S3 prefix …/models/evaluation/")
-    p.add_argument("--max-rows", type=int, default=500, help="Cap rows sent to Clarify (cost control)")
-    p.add_argument(
-        "--facet-column",
-        default="age",
-        help="Feature column used as Clarify bias facet (default: age)",
-    )
-    p.add_argument(
-        "--facet-threshold",
-        type=float,
-        default=50.0,
-        help="Threshold for continuous facet (default: 50 for age)",
-    )
+    p.add_argument("--max-rows", type=int, default=500, help="Cap rows for cost/runtime")
+    p.add_argument("--facet-column", default="age")
+    p.add_argument("--facet-threshold", type=float, default=50.0)
     p.add_argument("--probability-threshold", type=float, default=0.5)
     return p.parse_args()
+
+
+def _ensure_deps() -> None:
+    """Install xgboost + shap when missing (Processing jobs usually have egress)."""
+    need = []
+    try:
+        import xgboost  # noqa: F401
+    except ImportError:
+        need.append("xgboost==1.7.6")
+    try:
+        import shap  # noqa: F401
+    except ImportError:
+        need.append("shap==0.44.1")
+    try:
+        import pandas  # noqa: F401
+    except ImportError:
+        need.append("pandas")
+    if not need:
+        return
+    logger.info("Installing deps: %s", need)
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "-q", "--no-cache-dir", *need],
+        stdout=subprocess.DEVNULL,
+    )
 
 
 def _parse_s3(uri: str) -> tuple[str, str]:
@@ -98,17 +116,7 @@ def list_csv_keys(s3, bucket: str, prefix: str) -> list[str]:
     return keys
 
 
-def delete_model(sm, name: str) -> None:
-    try:
-        sm.delete_model(ModelName=name)
-        logger.info("Deleted ephemeral model %s", name)
-    except sm.exceptions.ClientError as e:
-        if "Could not find model" not in str(e):
-            logger.warning("Could not delete model %s: %s", name, e)
-
-
-def build_headered_dataset(s3, test_uri: str, max_rows: int) -> tuple[list[str], list[list[str]]]:
-    """Return (headers, rows) with label column ``y`` then feature_schema columns."""
+def build_headered_dataset(s3, test_uri: str, max_rows: int):
     from feature_schema import FEATURE_COLUMNS
 
     headers = ["y"] + list(FEATURE_COLUMNS)
@@ -123,7 +131,6 @@ def build_headered_dataset(s3, test_uri: str, max_rows: int) -> tuple[list[str],
             parts = line.split(",")
             if len(parts) < 2:
                 continue
-            # Pad/truncate to headers length
             if len(parts) < len(headers):
                 parts = parts + ["0"] * (len(headers) - len(parts))
             rows.append(parts[: len(headers)])
@@ -132,23 +139,216 @@ def build_headered_dataset(s3, test_uri: str, max_rows: int) -> tuple[list[str],
     return headers, rows
 
 
-def mean_baseline(headers: list[str], rows: list[list[str]]) -> list[float]:
-    """Feature-only mean vector for SHAP baseline (exclude label col 0)."""
-    if not rows:
-        return [0.0] * (len(headers) - 1)
-    n_feat = len(headers) - 1
-    acc = [0.0] * n_feat
-    for row in rows:
-        for i in range(n_feat):
-            acc[i] += float(row[i + 1])
-    return [v / len(rows) for v in acc]
+def download_booster(s3, model_data_url: str):
+    import xgboost as xgb
+
+    parsed = urlparse(model_data_url)
+    bucket, key = parsed.netloc, parsed.path.lstrip("/")
+    with tempfile.TemporaryDirectory() as tmp:
+        tar_path = os.path.join(tmp, "model.tar.gz")
+        s3.download_file(bucket, key, tar_path)
+        with tarfile.open(tar_path, "r:gz") as tar:
+            tar.extractall(tmp)
+        model_path = os.path.join(tmp, "xgboost-model")
+        if not os.path.exists(model_path):
+            # fallback: first non-tar file
+            candidates = [
+                os.path.join(tmp, n)
+                for n in os.listdir(tmp)
+                if not n.endswith(".tar.gz") and os.path.isfile(os.path.join(tmp, n))
+            ]
+            if not candidates:
+                raise SystemExit("xgboost-model not found in model.tar.gz")
+            model_path = candidates[0]
+        booster = xgb.Booster()
+        booster.load_model(model_path)
+        return booster
+
+
+def predict_proba(booster, feature_rows: list[list[float]]) -> list[float]:
+    import numpy as np
+    import xgboost as xgb
+
+    arr = np.asarray(feature_rows, dtype=float)
+    dmat = xgb.DMatrix(arr)
+    preds = booster.predict(dmat)
+    return [float(p) for p in preds]
+
+
+def bias_metrics(
+    y_true: list[int],
+    y_prob: list[float],
+    facet_values: list[float],
+    facet_threshold: float,
+    prob_threshold: float,
+) -> dict:
+    """Standardized pre-/post-training bias metrics (Clarify-compatible formulas)."""
+    import numpy as np
+
+    y = np.asarray(y_true, dtype=int)
+    p = np.asarray(y_prob, dtype=float)
+    f = np.asarray(facet_values, dtype=float)
+    yhat = (p >= prob_threshold).astype(int)
+
+    # facet group = 1 when value >= threshold (e.g. age >= 50)
+    g = (f >= facet_threshold).astype(int)
+    n = len(y)
+    if n == 0:
+        return {}
+
+    def rate(mask, labels):
+        m = int(mask.sum())
+        if m == 0:
+            return None, 0
+        return float(labels[mask].mean()), m
+
+    # Pre-training: label rates
+    p_pos_a, n_a = rate(g == 1, y)
+    p_pos_d, n_d = rate(g == 0, y)
+    dpl = None if p_pos_a is None or p_pos_d is None else p_pos_d - p_pos_a
+    di_pre = None
+    if p_pos_a not in (None, 0) and p_pos_d is not None:
+        di_pre = p_pos_d / p_pos_a
+
+    # Post-training: predicted positive rates + confusion-derived
+    pp_a, _ = rate(g == 1, yhat)
+    pp_d, _ = rate(g == 0, yhat)
+    dppl = None if pp_a is None or pp_d is None else pp_d - pp_a
+    di_post = None
+    if pp_a not in (None, 0) and pp_d is not None:
+        di_post = pp_d / pp_a
+
+    def confusion(mask):
+        yt, yh = y[mask], yhat[mask]
+        tp = int(((yt == 1) & (yh == 1)).sum())
+        tn = int(((yt == 0) & (yh == 0)).sum())
+        fp = int(((yt == 0) & (yh == 1)).sum())
+        fn = int(((yt == 1) & (yh == 0)).sum())
+        return {"tp": tp, "tn": tn, "fp": fp, "fn": fn}
+
+    def tpr_fpr(cm):
+        tpr = cm["tp"] / (cm["tp"] + cm["fn"]) if (cm["tp"] + cm["fn"]) else None
+        fpr = cm["fp"] / (cm["fp"] + cm["tn"]) if (cm["fp"] + cm["tn"]) else None
+        return tpr, fpr
+
+    cm_a, cm_d = confusion(g == 1), confusion(g == 0)
+    tpr_a, fpr_a = tpr_fpr(cm_a)
+    tpr_d, fpr_d = tpr_fpr(cm_d)
+    rd = None if tpr_a is None or tpr_d is None else tpr_d - tpr_a  # recall difference
+    ad = None if fpr_a is None or fpr_d is None else fpr_d - fpr_a  # acceptance/fpr diff
+
+    return {
+        "facet_group_definition": f"facet >= {facet_threshold}",
+        "n_total": n,
+        "n_facet": int((g == 1).sum()),
+        "n_remainder": int((g == 0).sum()),
+        "pre_training": {
+            "CI": {"facet": p_pos_a, "remainder": p_pos_d},
+            "DPL": dpl,
+            "DI": di_pre,
+        },
+        "post_training": {
+            "DPPL": dppl,
+            "DI": di_post,
+            "RD": rd,
+            "AD": ad,
+            "confusion_facet": cm_a,
+            "confusion_remainder": cm_d,
+        },
+        "probability_threshold": prob_threshold,
+    }
+
+
+def explainability(booster, feature_rows: list[list[float]], feature_names: list[str]) -> dict:
+    """Global feature attribution via SHAP TreeExplainer, else XGBoost gain."""
+    import numpy as np
+
+    method = "xgboost_gain"
+    scores: dict[str, float] = {}
+
+    try:
+        import shap
+
+        arr = np.asarray(feature_rows, dtype=float)
+        # Cap SHAP sample for runtime
+        sample = arr if len(arr) <= 100 else arr[:100]
+        explainer = shap.TreeExplainer(booster)
+        sv = explainer.shap_values(sample)
+        if isinstance(sv, list):
+            sv = sv[1] if len(sv) > 1 else sv[0]
+        mean_abs = np.abs(np.asarray(sv, dtype=float)).mean(axis=0)
+        scores = {feature_names[i]: float(mean_abs[i]) for i in range(len(feature_names))}
+        method = "shap_tree_explainer"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("SHAP unavailable (%s); falling back to XGBoost gain", e)
+        gain = booster.get_score(importance_type="gain")
+        # Keys are f0, f1, ...
+        for i, name in enumerate(feature_names):
+            scores[name] = float(gain.get(f"f{i}", 0.0))
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    return {
+        "method": method,
+        "global_mean_abs": {k: v for k, v in ranked},
+        "top_features": [{"feature": k, "score": v} for k, v in ranked[:15]],
+    }
+
+
+def render_report_html(analysis: dict) -> str:
+    bias = analysis.get("bias") or {}
+    pre = bias.get("pre_training") or {}
+    post = bias.get("post_training") or {}
+    expl = analysis.get("explainability") or {}
+    top = expl.get("top_features") or []
+
+    def fmt(v):
+        if v is None:
+            return "n/a"
+        if isinstance(v, float):
+            return f"{v:.4f}"
+        return html.escape(str(v))
+
+    rows = "".join(
+        f"<tr><td>{html.escape(t['feature'])}</td><td>{fmt(t['score'])}</td></tr>" for t in top
+    )
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Bias &amp; Explainability Report</title>
+<style>
+body{{font-family:system-ui,sans-serif;margin:2rem;max-width:900px}}
+table{{border-collapse:collapse;width:100%;margin:1rem 0}}
+th,td{{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}}
+th{{background:#f4f4f4}}
+.note{{color:#555;font-size:.9rem}}
+</style></head><body>
+<h1>Bank Marketing — Bias &amp; Explainability</h1>
+<p class="note">Replacement for SageMaker Clarify (closed to new customers).
+Metrics match Clarify formulas; attributions via {html.escape(str(expl.get('method')))}.</p>
+<p><b>Model</b>: {html.escape(str(analysis.get('model_name')))}<br>
+<b>Training job</b>: {html.escape(str(analysis.get('training_job')))}<br>
+<b>Facet</b>: {html.escape(str(analysis.get('facet_column')))} &gt;= {html.escape(str(analysis.get('facet_threshold')))}
+(n={bias.get('n_total')}, facet={bias.get('n_facet')}, remainder={bias.get('n_remainder')})<br>
+<b>Generated</b>: {html.escape(str(analysis.get('generated_at')))}</p>
+<h2>Pre-training bias</h2>
+<table><tr><th>Metric</th><th>Value</th></tr>
+<tr><td>DPL (difference in positive proportions of labels)</td><td>{fmt(pre.get('DPL'))}</td></tr>
+<tr><td>DI (disparate impact on labels)</td><td>{fmt(pre.get('DI'))}</td></tr>
+</table>
+<h2>Post-training bias</h2>
+<table><tr><th>Metric</th><th>Value</th></tr>
+<tr><td>DPPL (difference in positive proportions of predicted labels)</td><td>{fmt(post.get('DPPL'))}</td></tr>
+<tr><td>DI (disparate impact on predictions)</td><td>{fmt(post.get('DI'))}</td></tr>
+<tr><td>RD (recall difference)</td><td>{fmt(post.get('RD'))}</td></tr>
+<tr><td>AD (FPR difference)</td><td>{fmt(post.get('AD'))}</td></tr>
+</table>
+<h2>Global feature attribution</h2>
+<table><tr><th>Feature</th><th>Score</th></tr>{rows}</table>
+</body></html>
+"""
 
 
 def main() -> int:
     args = parse_args()
-    clarify_image = CLARIFY_IMAGE.get(args.region)
-    if not clarify_image:
-        raise SystemExit(f"No Clarify image mapped for region {args.region}")
+    _ensure_deps()
 
     sm = boto3.client("sagemaker", region_name=args.region)
     s3 = boto3.client("s3", region_name=args.region)
@@ -156,13 +356,10 @@ def main() -> int:
     training_job, model_data_url = find_latest_training_job(sm, args.training_job_prefix)
     suffix = training_job[len(args.training_job_prefix) :]
     model_name = f"{args.model_prefix}{suffix}"[:63]
-    job_name = f"stack-clarify{suffix}"[:63]
 
     out_root = args.output_path.rstrip("/")
     clarify_prefix = f"{out_root}/clarify/{model_name}/"
-    work_prefix = f"{out_root}/clarify/_work/{model_name}/"
     out_bucket, out_key_prefix = _parse_s3(clarify_prefix)
-    work_bucket, work_key_prefix = _parse_s3(work_prefix)
 
     logger.info("Training job : %s", training_job)
     logger.info("Model data   : %s", model_data_url)
@@ -177,159 +374,88 @@ def main() -> int:
             f"Facet column {args.facet_column!r} not in headers {headers}. "
             "Pass --facet-column matching feature_schema."
         )
-    logger.info("Clarify sample: %d rows, facet=%s>=%s", len(rows), args.facet_column, args.facet_threshold)
+    logger.info(
+        "Sample: %d rows, facet=%s>=%s", len(rows), args.facet_column, args.facet_threshold
+    )
 
-    # Upload headered dataset
-    dataset_key = work_key_prefix.rstrip("/") + "/dataset.csv"
-    csv_body = ",".join(headers) + "\n" + "\n".join(",".join(r) for r in rows) + "\n"
-    s3.put_object(Bucket=work_bucket, Key=dataset_key, Body=csv_body, ContentType="text/csv")
-    dataset_uri = f"s3://{work_bucket}/{dataset_key}"
+    facet_idx = headers.index(args.facet_column)
+    y_true = [int(float(r[0])) for r in rows]
+    facet_vals = [float(r[facet_idx]) for r in rows]
+    feature_names = headers[1:]
+    feature_rows = [[float(v) for v in r[1:]] for r in rows]
 
-    baseline = mean_baseline(headers, rows)
-    analysis_config = {
-        "dataset_type": "text/csv",
-        "headers": headers,
-        "label": "y",
-        "label_values_or_threshold": [1],
-        "facet": [
-            {
-                "name_or_index": args.facet_column,
-                "value_or_threshold": [args.facet_threshold],
-            }
-        ],
-        "probability_threshold": args.probability_threshold,
-        "methods": {
-            "pre_training_bias": {"methods": "all"},
-            "post_training_bias": {"methods": "all"},
-            "shap": {
-                "baseline": baseline,
-                "num_samples": min(50, max(10, len(rows) // 5)),
-                "agg_method": "mean_abs",
-                "use_logit": False,
-                "save_local_shap_values": False,
-            },
-            "report": {
-                "name": "report",
-                "title": "Bank Marketing Clarify Report",
-            },
-        },
-        "predictor": {
-            "model_name": model_name,
-            "instance_type": "ml.m5.xlarge",
-            "initial_instance_count": 1,
-            "accept_type": "text/csv",
-            "content_type": "text/csv",
-        },
+    booster = download_booster(s3, model_data_url)
+    y_prob = predict_proba(booster, feature_rows)
+    bias = bias_metrics(
+        y_true, y_prob, facet_vals, args.facet_threshold, args.probability_threshold
+    )
+    expl = explainability(booster, feature_rows, feature_names)
+
+    analysis = {
+        "engine": "clarify-replacement-local",
+        "note": (
+            "SageMaker Clarify processing is unavailable to new customers; "
+            "this report uses standardized bias formulas + SHAP/XGBoost gain."
+        ),
+        "training_job": training_job,
+        "model_name": model_name,
+        "model_data_url": model_data_url,
+        "facet_column": args.facet_column,
+        "facet_threshold": args.facet_threshold,
+        "sample_rows": len(rows),
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "bias": bias,
+        "explainability": expl,
     }
-    config_key = work_key_prefix.rstrip("/") + "/analysis_config.json"
+
+    report_html = render_report_html(analysis)
+    analysis_key = out_key_prefix.rstrip("/") + "/analysis.json"
+    report_key = out_key_prefix.rstrip("/") + "/report.html"
     s3.put_object(
-        Bucket=work_bucket,
-        Key=config_key,
-        Body=json.dumps(analysis_config, indent=2),
+        Bucket=out_bucket,
+        Key=analysis_key,
+        Body=json.dumps(analysis, indent=2),
         ContentType="application/json",
     )
-    config_uri = f"s3://{work_bucket}/{config_key}"
-
-    delete_model(sm, model_name)
-    sm.create_model(
-        ModelName=model_name,
-        PrimaryContainer={"Image": args.image_uri, "ModelDataUrl": model_data_url},
-        ExecutionRoleArn=args.execution_role_arn,
+    s3.put_object(
+        Bucket=out_bucket,
+        Key=report_key,
+        Body=report_html.encode("utf-8"),
+        ContentType="text/html",
     )
-    logger.info("Created ephemeral model %s", model_name)
 
-    try:
-        # Ensure unique job name on retries
-        unique_job = f"{job_name}-{int(time.time())}"[-63:]
-        sm.create_processing_job(
-            ProcessingJobName=unique_job,
-            RoleArn=args.execution_role_arn,
-            AppSpecification={"ImageUri": clarify_image},
-            ProcessingInputs=[
-                {
-                    "InputName": "analysis_config",
-                    "S3Input": {
-                        "S3Uri": config_uri,
-                        "LocalPath": "/opt/ml/processing/input/config",
-                        "S3DataType": "S3Prefix",
-                        "S3InputMode": "File",
-                        "S3CompressionType": "None",
-                    },
-                },
-                {
-                    "InputName": "dataset",
-                    "S3Input": {
-                        "S3Uri": dataset_uri,
-                        "LocalPath": "/opt/ml/processing/input/data",
-                        "S3DataType": "S3Prefix",
-                        "S3InputMode": "File",
-                        "S3CompressionType": "None",
-                    },
-                },
-            ],
-            ProcessingOutputConfig={
-                "Outputs": [
-                    {
-                        "OutputName": "analysis_result",
-                        "S3Output": {
-                            "S3Uri": clarify_prefix,
-                            "LocalPath": "/opt/ml/processing/output",
-                            "S3UploadMode": "EndOfJob",
-                        },
-                    }
-                ]
-            },
-            ProcessingResources={
-                "ClusterConfig": {
-                    "InstanceCount": 1,
-                    "InstanceType": "ml.m5.xlarge",
-                    "VolumeSizeInGB": 30,
-                }
-            },
-            StoppingCondition={"MaxRuntimeInSeconds": 3600},
-        )
-        logger.info("Started Clarify job %s — waiting…", unique_job)
-        waiter = sm.get_waiter("processing_job_completed_or_stopped")
-        waiter.wait(ProcessingJobName=unique_job, WaiterConfig={"Delay": 30, "MaxAttempts": 80})
-        info = sm.describe_processing_job(ProcessingJobName=unique_job)
-        status = info["ProcessingJobStatus"]
-        if status != "Completed":
-            logger.error("Clarify %s: %s", status, info.get("FailureReason"))
-            return 1
+    summary = {
+        "training_job": training_job,
+        "model_name": model_name,
+        "model_data_url": model_data_url,
+        "clarify_job": "local-clarify-replacement",
+        "clarify_output_uri": clarify_prefix,
+        "facet_column": args.facet_column,
+        "facet_threshold": args.facet_threshold,
+        "sample_rows": len(rows),
+        "engine": "clarify-replacement-local",
+        "explainability_method": expl.get("method"),
+        "report_html": clarify_prefix.rstrip("/") + "/report.html",
+        "analysis_json": clarify_prefix.rstrip("/") + "/analysis.json",
+    }
+    summary_key = out_key_prefix.rstrip("/") + "/clarify_summary.json"
+    s3.put_object(
+        Bucket=out_bucket,
+        Key=summary_key,
+        Body=json.dumps(summary, indent=2),
+        ContentType="application/json",
+    )
+    latest_key = _parse_s3(out_root + "/clarify/latest/clarify_summary.json")[1]
+    s3.put_object(
+        Bucket=out_bucket,
+        Key=latest_key,
+        Body=json.dumps(summary, indent=2),
+        ContentType="application/json",
+    )
 
-        summary = {
-            "training_job": training_job,
-            "model_name": model_name,
-            "model_data_url": model_data_url,
-            "clarify_job": unique_job,
-            "clarify_output_uri": clarify_prefix,
-            "dataset_uri": dataset_uri,
-            "facet_column": args.facet_column,
-            "facet_threshold": args.facet_threshold,
-            "sample_rows": len(rows),
-            "report_html": clarify_prefix.rstrip("/") + "/report.html",
-            "analysis_json": clarify_prefix.rstrip("/") + "/analysis.json",
-        }
-        summary_key = out_key_prefix.rstrip("/") + "/clarify_summary.json"
-        s3.put_object(
-            Bucket=out_bucket,
-            Key=summary_key,
-            Body=json.dumps(summary, indent=2),
-            ContentType="application/json",
-        )
-        # Stable pointer for Model Card step
-        latest_key = _parse_s3(out_root + "/clarify/latest/clarify_summary.json")[1]
-        s3.put_object(
-            Bucket=out_bucket,
-            Key=latest_key,
-            Body=json.dumps(summary, indent=2),
-            ContentType="application/json",
-        )
-        logger.info("SUCCESS — Clarify report: %s", summary["report_html"])
-        logger.info("Summary: s3://%s/%s", out_bucket, summary_key)
-        return 0
-    finally:
-        delete_model(sm, model_name)
+    logger.info("SUCCESS — report: %s", summary["report_html"])
+    logger.info("Summary: s3://%s/%s", out_bucket, summary_key)
+    return 0
 
 
 if __name__ == "__main__":

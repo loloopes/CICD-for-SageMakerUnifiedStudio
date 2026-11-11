@@ -4,7 +4,7 @@
 # Flow: preprocess → train → evaluate → clarify + register → model_card
 # Dataset: UCI Bank Mktg (binary classification - term deposit subscription)
 #
-# Pattern: Preprocess → Train → Evaluate → Clarify (bias/SHAP) + Register
+# Pattern: Preprocess → Train → Evaluate → Bias/SHAP (Clarify replacement) + Register
 #          → Model Card (governance summary for Studio)
 # No endpoint deployment — focused on model development and registry.
 # =============================================================================
@@ -150,7 +150,9 @@ training_pipeline:
         StoppingCondition:
           MaxRuntimeInSeconds: 1800
 
-    # ---- 4. Clarify bias + SHAP (Processing → Clarify container) ----
+    # ---- 4. Bias + SHAP (Clarify replacement: local metrics in Processing) ----
+    # SageMaker Clarify processing is closed to new customers; run_clarify.py
+    # computes the same bias formulas + SHAP/XGBoost gain in-process.
     clarify_analysis:
       operator: airflow.providers.amazon.aws.operators.sagemaker.SageMakerProcessingOperator
       retries: 0
