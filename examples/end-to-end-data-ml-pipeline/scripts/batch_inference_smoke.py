@@ -2,9 +2,9 @@
 """One-shot SageMaker Batch Transform smoke test.
 
 Scores a features split with the **same model currently serving** a realtime
-endpoint (dev / test / prod). Creates an ephemeral Batch Model from that
-endpoint's image + ModelDataUrl (plain XGBoost — no realtime inference.py),
-writes enriched CSV, then deletes the ephemeral Model.
+endpoint (dev / test / prod). Creates an ephemeral Model that mirrors the
+endpoint container (image + ModelDataUrl + ``inference.py`` env) so Batch
+Transform scores match InvokeEndpoint, then writes enriched CSV.
 
 Example::
 
@@ -92,11 +92,11 @@ def _list_keys(s3, bucket: str, prefix: str) -> list[str]:
 
 def _resolve_endpoint_serving(
     sm, endpoint_name: str, fallback_image: str
-) -> tuple[str, str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, str, dict]:
     """Return endpoint serving details for Batch Transform.
 
     ``(sm_model_name, model_data_url, image_uri, display_name, display_version,
-    execution_role_arn)``
+    execution_role_arn, environment)``
     """
     ep = sm.describe_endpoint(EndpointName=endpoint_name)
     status = ep.get("EndpointStatus")
@@ -118,7 +118,7 @@ def _resolve_endpoint_serving(
     primary = containers[0]
     model_data_url = primary.get("ModelDataUrl") or ""
     image_uri = primary.get("Image") or fallback_image
-    env = primary.get("Environment") or {}
+    env = dict(primary.get("Environment") or {})
 
     display_name = env.get("MODEL_NAME") or sm_model_name
     display_version = env.get("MODEL_VERSION") or "unknown"
@@ -139,6 +139,12 @@ def _resolve_endpoint_serving(
             f"(model {sm_model_name})"
         )
 
+    # Ensure script-mode serving (same path as InvokeEndpoint).
+    env.setdefault("SAGEMAKER_PROGRAM", "inference.py")
+    env.setdefault("SAGEMAKER_SUBMIT_DIRECTORY", "/opt/ml/model/code")
+    env.setdefault("MODEL_NAME", display_name)
+    env.setdefault("MODEL_VERSION", str(display_version))
+
     return (
         sm_model_name,
         model_data_url,
@@ -146,6 +152,7 @@ def _resolve_endpoint_serving(
         display_name,
         display_version,
         execution_role_arn,
+        env,
     )
 
 
@@ -158,15 +165,47 @@ def _delete_model(sm, name: str) -> None:
             logger.warning("Could not delete model %s: %s", name, e)
 
 
-def _read_transform_scores(s3, out_bucket: str, out_prefix: str) -> list[float]:
-    scores: list[float] = []
+def _collect_transform_bodies(s3, out_bucket: str, out_prefix: str) -> list[str]:
+    bodies: list[str] = []
     for key in sorted(_list_keys(s3, out_bucket, out_prefix)):
-        if not key.endswith(".out") and not key.endswith(".csv.out"):
+        if key.rstrip("/").endswith("enriched_predictions.csv"):
             continue
-        body = s3.get_object(Bucket=out_bucket, Key=key)["Body"].read().decode("utf-8")
-        for line in body.splitlines():
+        if not (key.endswith(".out") or key.endswith(".csv.out")):
+            continue
+        bodies.append(
+            s3.get_object(Bucket=out_bucket, Key=key)["Body"].read().decode("utf-8")
+        )
+    return bodies
+
+
+def _parse_scores_from_bodies(bodies: list[str]) -> list[float]:
+    """Parse raw floats or enriched CSV/JSON produced by inference.py."""
+    scores: list[float] = []
+    for body in bodies:
+        text = body.strip()
+        if not text:
+            continue
+        if text.startswith("[") or text.startswith("{"):
+            payload = json.loads(text)
+            if isinstance(payload, dict):
+                payload = [payload]
+            for item in payload:
+                if isinstance(item, dict) and "score" in item:
+                    scores.append(float(item["score"]))
+                else:
+                    scores.append(float(item))
+            continue
+        first = text.splitlines()[0].lower()
+        if "score" in first and "," in first:
+            reader = csv.DictReader(io.StringIO(text))
+            for row in reader:
+                if not row or (row.get("score") or "").strip().lower() == "score":
+                    continue
+                scores.append(float(str(row["score"]).strip()))
+            continue
+        for line in text.splitlines():
             cell = line.strip().split(",")[0].strip() if line.strip() else ""
-            if cell:
+            if cell and cell.lower() != "score":
                 scores.append(float(cell))
     return scores
 
@@ -180,7 +219,58 @@ def _write_enriched_csv(
     model_name: str,
     model_version: str,
     inference_timestamp: str,
+    transform_bodies: list[str] | None = None,
 ) -> str:
+    """Prefer inference.py enriched output; otherwise merge scores + features."""
+    key = out_prefix.rstrip("/") + "/enriched_predictions.csv"
+
+    # If Batch Transform already returned enriched CSV/JSON from inference.py,
+    # normalize into a single CSV (same schema as the live endpoint).
+    if transform_bodies:
+        rows: list[dict] = []
+        for body in transform_bodies:
+            text = body.strip()
+            if not text:
+                continue
+            if text.startswith("[") or text.startswith("{"):
+                payload = json.loads(text)
+                if isinstance(payload, dict):
+                    payload = [payload]
+                for item in payload:
+                    if isinstance(item, dict) and "score" in item:
+                        rows.append(item)
+                continue
+            first = text.splitlines()[0].lower()
+            if "score" in first and "features" in first:
+                reader = csv.DictReader(io.StringIO(text))
+                for row in reader:
+                    if not row or (row.get("score") or "").strip().lower() == "score":
+                        continue
+                    rows.append(row)
+        if rows:
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(
+                ["score", "features", "model_name", "model_version", "inference_timestamp"]
+            )
+            for row in rows:
+                feats = row.get("features", [])
+                if not isinstance(feats, str):
+                    feats = json.dumps(feats)
+                writer.writerow(
+                    [
+                        row.get("score"),
+                        feats,
+                        row.get("model_name") or model_name,
+                        row.get("model_version") or model_version,
+                        row.get("inference_timestamp") or inference_timestamp,
+                    ]
+                )
+            s3.put_object(
+                Bucket=out_bucket, Key=key, Body=buf.getvalue(), ContentType="text/csv"
+            )
+            return f"s3://{out_bucket}/{key}"
+
     if len(scores) != len(feature_rows):
         raise SystemExit(
             f"Score/feature mismatch: {len(scores)} scores vs {len(feature_rows)} feature rows"
@@ -203,7 +293,6 @@ def _write_enriched_csv(
             ]
         )
 
-    key = out_prefix.rstrip("/") + "/enriched_predictions.csv"
     s3.put_object(Bucket=out_bucket, Key=key, Body=buf.getvalue(), ContentType="text/csv")
     return f"s3://{out_bucket}/{key}"
 
@@ -279,6 +368,7 @@ def main() -> int:
         display_name,
         display_version,
         endpoint_role_arn,
+        serving_env,
     ) = _resolve_endpoint_serving(sm, endpoint_name, fallback_image)
     # Prefer the endpoint model's role so Batch Transform can read the same
     # ModelDataUrl the realtime endpoint uses (esp. test/prod staged artifacts).
@@ -291,6 +381,7 @@ def main() -> int:
     logger.info("Model name   : %s", display_name)
     logger.info("Model version: %s", display_version)
     logger.info("Create role  : %s", create_role_arn)
+    logger.info("Serving prog : %s", serving_env.get("SAGEMAKER_PROGRAM"))
     logger.info("Input split  : %s", input_uri if not local_dir else f"local:{local_dir}")
     logger.info("Output root  : %s", output_uri)
 
@@ -325,15 +416,19 @@ def main() -> int:
     ephemeral_model = f"stack-batch-smoke-{ts}"
     transform_name = f"stack-batch-smoke-{ts}"
 
-    # Ephemeral Batch Model: same weights as the endpoint, but without
-    # SAGEMAKER_PROGRAM=inference.py so XGBoost Batch Transform scores CSV lines.
+    # Ephemeral model mirrors the live endpoint: same artifact + inference.py so
+    # Batch Transform scores match InvokeEndpoint (built-in XGBoost path does not).
     _delete_model(sm, ephemeral_model)
     sm.create_model(
         ModelName=ephemeral_model,
-        PrimaryContainer={"Image": image_uri, "ModelDataUrl": model_data_url},
+        PrimaryContainer={
+            "Image": image_uri,
+            "ModelDataUrl": model_data_url,
+            "Environment": serving_env,
+        },
         ExecutionRoleArn=create_role_arn,
     )
-    logger.info("Created ephemeral batch model %s", ephemeral_model)
+    logger.info("Created ephemeral batch model %s (with inference.py)", ephemeral_model)
 
     # Stage feature-only CSVs under the *output* project's shared prefix so the
     # stage execution role can always read them (even when features live on DEV).
@@ -378,6 +473,8 @@ def main() -> int:
     logger.info("Batch Transform output: %s", out_uri)
 
     try:
+        # No SplitType: whole CSV is one payload (same as multi-row InvokeEndpoint).
+        # Accept text/csv so inference.py output_fn returns the enriched schema.
         sm.create_transform_job(
             TransformJobName=transform_name,
             ModelName=ephemeral_model,
@@ -386,9 +483,12 @@ def main() -> int:
                     "S3DataSource": {"S3DataType": "S3Prefix", "S3Uri": infer_uri}
                 },
                 "ContentType": "text/csv",
-                "SplitType": "Line",
             },
-            TransformOutput={"S3OutputPath": out_uri, "AssembleWith": "Line"},
+            TransformOutput={
+                "S3OutputPath": out_uri,
+                "AssembleWith": "Line",
+                "Accept": "text/csv",
+            },
             TransformResources={"InstanceType": "ml.m5.large", "InstanceCount": 1},
         )
         logger.info("Started transform job %s — waiting…", transform_name)
@@ -403,7 +503,8 @@ def main() -> int:
             logger.error("Transform %s: %s", status, info.get("FailureReason"))
             return 1
 
-        scores = _read_transform_scores(s3, out_bucket, out_prefix)
+        transform_bodies = _collect_transform_bodies(s3, out_bucket, out_prefix)
+        scores = _parse_scores_from_bodies(transform_bodies)
         inference_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         enriched_uri = _write_enriched_csv(
             s3,
@@ -414,6 +515,7 @@ def main() -> int:
             model_name=display_name,
             model_version=display_version,
             inference_timestamp=inference_timestamp,
+            transform_bodies=transform_bodies,
         )
 
         logger.info("SUCCESS — raw scores at %s", info["TransformOutput"]["S3OutputPath"])
