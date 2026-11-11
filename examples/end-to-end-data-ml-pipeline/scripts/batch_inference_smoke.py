@@ -415,64 +415,62 @@ def main() -> int:
     ts = int(time.time())
     ephemeral_model = f"stack-batch-smoke-{ts}"
     transform_name = f"stack-batch-smoke-{ts}"
-
-    # Ephemeral model mirrors the live endpoint: same artifact + inference.py so
-    # Batch Transform scores match InvokeEndpoint (built-in XGBoost path does not).
-    _delete_model(sm, ephemeral_model)
-    sm.create_model(
-        ModelName=ephemeral_model,
-        PrimaryContainer={
-            "Image": image_uri,
-            "ModelDataUrl": model_data_url,
-            "Environment": serving_env,
-        },
-        ExecutionRoleArn=create_role_arn,
-    )
-    logger.info("Created ephemeral batch model %s (with inference.py)", ephemeral_model)
-
-    # Stage feature-only CSVs under the *output* project's shared prefix so the
-    # stage execution role can always read them (even when features live on DEV).
     out_bucket, out_root_prefix = _parse_s3(output_uri)
     infer_prefix = f"{out_root_prefix.rstrip('/')}/_input/{ephemeral_model}/"
-    for key in _list_keys(s3, out_bucket, infer_prefix):
-        s3.delete_object(Bucket=out_bucket, Key=key)
-
-    feature_rows: list[list[str]] = []
-    for filename, body in csv_payloads:
-        lines = [ln for ln in body.strip().split("\n") if ln.strip()]
-        feat_lines: list[str] = []
-        for ln in lines:
-            parts = ln.split(",")
-            if len(parts) < 2:
-                continue
-            feats = parts[1:]
-            feature_rows.append(feats)
-            feat_lines.append(",".join(feats))
-            if args.max_rows and len(feature_rows) >= args.max_rows:
-                break
-        dest = infer_prefix + filename
-        s3.put_object(
-            Bucket=out_bucket,
-            Key=dest,
-            Body="\n".join(feat_lines) + ("\n" if feat_lines else ""),
-            ContentType="text/csv",
-        )
-        logger.info("Staged %s (%d feature rows so far)", dest, len(feature_rows))
-        if args.max_rows and len(feature_rows) >= args.max_rows:
-            break
-
-    if not feature_rows:
-        logger.error("No feature rows prepared — aborting")
-        _delete_model(sm, ephemeral_model)
-        return 1
-
-    infer_uri = f"s3://{out_bucket}/{infer_prefix}"
     out_uri = f"{output_uri.rstrip('/')}/{ephemeral_model}/"
     _, out_prefix = _parse_s3(out_uri)
-    logger.info("Batch Transform input : %s", infer_uri)
-    logger.info("Batch Transform output: %s", out_uri)
 
+    # Create + stage + transform all under finally so a mid-run failure cannot
+    # leave stack-batch-smoke-* Models cluttering Studio (seen on AccessDenied).
+    _delete_model(sm, ephemeral_model)
     try:
+        # Ephemeral model mirrors the live endpoint (artifact + inference.py).
+        sm.create_model(
+            ModelName=ephemeral_model,
+            PrimaryContainer={
+                "Image": image_uri,
+                "ModelDataUrl": model_data_url,
+                "Environment": serving_env,
+            },
+            ExecutionRoleArn=create_role_arn,
+        )
+        logger.info("Created ephemeral batch model %s (with inference.py)", ephemeral_model)
+
+        for key in _list_keys(s3, out_bucket, infer_prefix):
+            s3.delete_object(Bucket=out_bucket, Key=key)
+
+        feature_rows: list[list[str]] = []
+        for filename, body in csv_payloads:
+            lines = [ln for ln in body.strip().split("\n") if ln.strip()]
+            feat_lines: list[str] = []
+            for ln in lines:
+                parts = ln.split(",")
+                if len(parts) < 2:
+                    continue
+                feats = parts[1:]
+                feature_rows.append(feats)
+                feat_lines.append(",".join(feats))
+                if args.max_rows and len(feature_rows) >= args.max_rows:
+                    break
+            dest = infer_prefix + filename
+            s3.put_object(
+                Bucket=out_bucket,
+                Key=dest,
+                Body="\n".join(feat_lines) + ("\n" if feat_lines else ""),
+                ContentType="text/csv",
+            )
+            logger.info("Staged %s (%d feature rows so far)", dest, len(feature_rows))
+            if args.max_rows and len(feature_rows) >= args.max_rows:
+                break
+
+        if not feature_rows:
+            logger.error("No feature rows prepared — aborting")
+            return 1
+
+        infer_uri = f"s3://{out_bucket}/{infer_prefix}"
+        logger.info("Batch Transform input : %s", infer_uri)
+        logger.info("Batch Transform output: %s", out_uri)
+
         # No SplitType: whole CSV is one payload (same as multi-row InvokeEndpoint).
         # Accept text/csv so inference.py output_fn returns the enriched schema.
         sm.create_transform_job(
