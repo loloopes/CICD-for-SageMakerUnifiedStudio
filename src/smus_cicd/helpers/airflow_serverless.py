@@ -335,24 +335,53 @@ def create_workflow(
 
             except Exception as update_error:
                 if "ServiceQuotaExceededException" in str(update_error):
-                    logger.error(
-                        f"Workflow update failed because the workflow version quota limit "
-                        f"has been reached for '{workflow_name}'."
+                    # Each UpdateWorkflow creates a new version; the service caps
+                    # versions per workflow (~50). Prune non-latest versions and
+                    # retry once so CI deploys are self-healing.
+                    logger.warning(
+                        "Workflow version quota reached for '%s'; pruning "
+                        "old versions and retrying update…",
+                        workflow_name,
                     )
                     import typer
 
-                    typer.echo(
-                        f"\n❌ Workflow update failed: version quota limit reached for '{workflow_name}'.\n"
-                        f"\nTo resolve, delete old versions or the entire workflow and retry:\n"
-                        f"\n  # Delete a specific version:\n"
-                        f"  aws mwaa-serverless delete-workflow \\\n"
-                        f"    --workflow-arn {workflow_arn} \\\n"
-                        f"    --workflow-version <VERSION>\n"
-                        f"\n  # Or delete the entire workflow (loses run history):\n"
-                        f"  aws mwaa-serverless delete-workflow \\\n"
-                        f"    --workflow-arn {workflow_arn}\n"
+                    pruned = prune_old_workflow_versions(
+                        workflow_arn,
+                        connection_info=connection_info,
+                        region=region,
+                        keep_latest=1,
                     )
-                    raise
+                    typer.echo(
+                        f"⚠️  Version quota hit for '{workflow_name}'. "
+                        f"Deleted {pruned} old version(s); retrying update…"
+                    )
+                    try:
+                        update_response = client.update_workflow(**update_params)
+                        logger.info(
+                            f"Successfully updated workflow after prune: {workflow_arn}"
+                        )
+                        return {
+                            "workflow_arn": workflow_arn,
+                            "workflow_version": update_response.get("WorkflowVersion"),
+                            "success": True,
+                            "already_exists": True,
+                            "updated": True,
+                            "pruned_versions": pruned,
+                        }
+                    except Exception as retry_error:
+                        logger.error(
+                            f"Workflow update still failed after pruning "
+                            f"'{workflow_name}': {retry_error}"
+                        )
+                        typer.echo(
+                            f"\n❌ Workflow update failed after pruning old versions "
+                            f"for '{workflow_name}'.\n"
+                            f"\nManual cleanup:\n"
+                            f"  aws mwaa-serverless delete-workflow \\\n"
+                            f"    --workflow-arn {workflow_arn} \\\n"
+                            f"    --workflow-version <VERSION>\n"
+                        )
+                        raise
                 logger.error(
                     f"Failed to update workflow {workflow_name}: {update_error}"
                 )
@@ -673,6 +702,63 @@ def is_workflow_run_complete(
     except Exception as e:
         logger.error(f"Error checking task status for {run_id}: {e}")
         return False, None
+
+
+def prune_old_workflow_versions(
+    workflow_arn: str,
+    connection_info: Dict[str, Any] = None,
+    region: str = None,
+    keep_latest: int = 1,
+) -> int:
+    """Delete non-latest workflow versions to free UpdateWorkflow quota.
+
+    MWAA Serverless caps versions per workflow (observed ~50). Each
+    ``update_workflow`` creates a new version, so repeated CI deploys hit
+    ``ServiceQuotaExceededException``. Returns the number of versions deleted.
+    """
+    logger = get_logger("airflow_serverless")
+    client = create_airflow_serverless_client(connection_info, region)
+
+    versions: List[Dict[str, Any]] = []
+    next_token = None
+    while True:
+        params: Dict[str, Any] = {"WorkflowArn": workflow_arn}
+        if next_token:
+            params["NextToken"] = next_token
+        resp = client.list_workflow_versions(**params)
+        versions.extend(resp.get("WorkflowVersions") or [])
+        next_token = resp.get("NextToken")
+        if not next_token:
+            break
+
+    # Prefer the IsLatestVersion flag; fall back to ModifiedAt ordering.
+    latest = [v for v in versions if v.get("IsLatestVersion")]
+    if not latest:
+        versions_sorted = sorted(
+            versions, key=lambda v: v.get("ModifiedAt") or v.get("CreatedAt") or "", reverse=True
+        )
+        keep = {v["WorkflowVersion"] for v in versions_sorted[: max(1, keep_latest)]}
+    else:
+        keep = {v["WorkflowVersion"] for v in latest}
+
+    deleted = 0
+    for v in versions:
+        vid = v.get("WorkflowVersion")
+        if not vid or vid in keep:
+            continue
+        try:
+            client.delete_workflow(WorkflowArn=workflow_arn, WorkflowVersion=vid)
+            deleted += 1
+        except Exception as e:  # noqa: BLE001 — best-effort prune
+            logger.warning("Could not delete workflow version %s: %s", vid, e)
+
+    logger.info(
+        "Pruned %s old version(s) from %s (kept %s)",
+        deleted,
+        workflow_arn,
+        ",".join(sorted(keep)) or "none",
+    )
+    return deleted
 
 
 def delete_workflow(
