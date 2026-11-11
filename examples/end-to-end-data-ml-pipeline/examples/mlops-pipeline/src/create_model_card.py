@@ -278,7 +278,7 @@ def build_standalone_card_content(
         },
         "training_details": {
             "objective_function": {
-                "function": {"function": "BinaryCrossEntropy"},
+                "function": {"function": "Maximize", "facet": "auc"},
                 "notes": "objective=binary:logistic, eval_metric=auc",
             },
             "training_observations": _clip(
@@ -300,17 +300,26 @@ def build_standalone_card_content(
                 f"Card generated {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}.",
                 2048,
             ),
-            "custom_details": {
-                "evaluation_report_uri": _clip(eval_report.get("_s3_uri", ""), 1024),
-                "clarify_summary_uri": _clip((clarify or {}).get("_s3_uri", ""), 1024),
-                "clarify_report_html": _clip((clarify or {}).get("report_html", ""), 1024),
-                "enriched_predictions_uri": _clip(
-                    eval_report.get("enriched_predictions_uri", ""), 1024
-                ),
-            },
         },
     }
+    custom = _nonempty_details(
+        {
+            "evaluation_report_uri": _clip(eval_report.get("_s3_uri", ""), 1024),
+            "clarify_summary_uri": _clip((clarify or {}).get("_s3_uri", ""), 1024),
+            "clarify_report_html": _clip((clarify or {}).get("report_html", ""), 1024),
+            "enriched_predictions_uri": _clip(
+                eval_report.get("enriched_predictions_uri", ""), 1024
+            ),
+        }
+    )
+    if custom:
+        content["additional_information"]["custom_details"] = custom
     return json.dumps(content)
+
+
+def _nonempty_details(d: dict) -> dict:
+    """Drop empty custom_details values (package schema is picky)."""
+    return {k: v for k, v in d.items() if isinstance(v, str) and v.strip()}
 
 
 def build_package_card_content(
@@ -348,6 +357,15 @@ def build_package_card_content(
             }
         )
 
+    # Keep package card minimal: omit training_details.objective_function —
+    # that nested schema has rejected UpdateModelPackage in practice.
+    custom = _nonempty_details(
+        {
+            "evaluation_report_uri": _clip(eval_report.get("_s3_uri", ""), 1024),
+            "clarify_report_html": _clip((clarify or {}).get("report_html", ""), 1024),
+            "clarify_summary_uri": _clip((clarify or {}).get("_s3_uri", ""), 1024),
+        }
+    )
     content = {
         "model_overview": {
             "model_creator": "stack-mlops-training-pipeline",
@@ -371,12 +389,9 @@ def build_package_card_content(
             ),
         },
         "training_details": {
-            "objective_function": {
-                "function": {"function": "Maximize", "facet": "auc"},
-                "notes": "objective=binary:logistic, eval_metric=auc",
-            },
             "training_observations": _clip(
                 f"Training job {eval_report.get('training_job')}. "
+                f"objective=binary:logistic eval_metric=auc. "
                 f"Eval: {eval_report.get('_s3_uri')}.",
                 1024,
             ),
@@ -394,11 +409,7 @@ def build_package_card_content(
                 f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}.",
                 2048,
             ),
-            "custom_details": {
-                "evaluation_report_uri": _clip(eval_report.get("_s3_uri", ""), 1024),
-                "clarify_report_html": _clip((clarify or {}).get("report_html", ""), 1024),
-                "clarify_summary_uri": _clip((clarify or {}).get("_s3_uri", ""), 1024),
-            },
+            **({"custom_details": custom} if custom else {}),
         },
     }
     return json.dumps(content)
@@ -415,15 +426,51 @@ def attach_package_card(sm, pkg: dict, package_content: str, clarify: dict | Non
         report = str(clarify["report_html"])
         meta["clarify_report_html"] = _clip(report, 256)
         meta["clarify_engine"] = _clip(str(clarify.get("engine", "local")), 256)
-    sm.update_model_package(
-        ModelPackageArn=arn,
-        ModelCard={
-            "ModelCardContent": package_content,
-            "ModelCardStatus": "Draft",
-        },
-        CustomerMetadataProperties=meta,
-    )
-    logger.info("Attached ModelCard + metadata to package %s", arn)
+
+    # 1) ModelCard only (most common failure is Content schema).
+    try:
+        sm.update_model_package(
+            ModelPackageArn=arn,
+            ModelCard={
+                "ModelCardContent": package_content,
+                "ModelCardStatus": "Draft",
+            },
+        )
+        logger.info("Attached ModelCard to package %s", arn)
+    except sm.exceptions.ClientError as e:
+        logger.error("update_model_package(ModelCard=…) failed: %s", e)
+        # 2) Retry with a bare-minimum card (metrics + intended uses only).
+        minimal = {
+            "model_overview": {
+                "model_creator": "stack-mlops-training-pipeline",
+                "model_artifact": json.loads(package_content)
+                .get("model_overview", {})
+                .get("model_artifact", []),
+            },
+            "intended_uses": {
+                "purpose_of_model": "Bank marketing term-deposit scoring (demo).",
+                "intended_uses": "CI/CD MLOps demo only.",
+                "risk_rating": "Low",
+            },
+            "evaluation_details": json.loads(package_content).get("evaluation_details")
+            or [],
+        }
+        logger.info("Retrying package ModelCard with minimal content")
+        sm.update_model_package(
+            ModelPackageArn=arn,
+            ModelCard={
+                "ModelCardContent": json.dumps(minimal),
+                "ModelCardStatus": "Draft",
+            },
+        )
+        logger.info("Attached minimal ModelCard to package %s", arn)
+
+    # 3) Metadata separately so a metadata rejection cannot roll back the card.
+    try:
+        sm.update_model_package(ModelPackageArn=arn, CustomerMetadataProperties=meta)
+        logger.info("Attached CustomerMetadataProperties to package %s", arn)
+    except sm.exceptions.ClientError as e:
+        logger.warning("CustomerMetadataProperties update failed (non-fatal): %s", e)
 
 
 def upsert_standalone_card(sm, name: str, content: str) -> None:
@@ -479,25 +526,27 @@ def main() -> int:
     logger.info("Package    : %s", (pkg or {}).get("ModelPackageArn", "none"))
     logger.info("Model card : %s", args.model_card_name)
 
+    package_ok = False
+    standalone_ok = False
+
     # 1) Attach to registry version — this is what Studio Models UI shows.
     if pkg and pkg.get("ModelPackageArn"):
         try:
             attach_package_card(sm, pkg, package_content, clarify)
+            package_ok = True
         except sm.exceptions.ClientError as e:
-            logger.error("update_model_package(ModelCard=…) failed: %s", e)
-            raise
+            logger.error("Package ModelCard attach failed after retries: %s", e)
     else:
         logger.warning("No model package found; skipping package ModelCard attach")
 
     # 2) Standalone card (Governance list / export).
     try:
         upsert_standalone_card(sm, args.model_card_name, standalone)
+        standalone_ok = True
     except sm.exceptions.ClientError as e:
-        # Package attach is the GUI path that matters; don't fail the DAG if
-        # standalone CreateModelCard is restricted in the account.
-        logger.warning("Standalone Model Card upsert failed (non-fatal): %s", e)
+        logger.warning("Standalone Model Card upsert failed: %s", e)
 
-    # Persist card snapshot next to evaluation artifacts
+    # Persist card snapshot next to evaluation artifacts (even on partial success).
     bucket, prefix = _parse_s3(args.evaluation_path)
     snap_key = prefix.rstrip("/") + f"/model_cards/{args.model_card_name}.json"
     s3.put_object(
@@ -507,6 +556,8 @@ def main() -> int:
             {
                 "model_card_name": args.model_card_name,
                 "status": "Draft",
+                "package_ok": package_ok,
+                "standalone_ok": standalone_ok,
                 "package_arn": (pkg or {}).get("ModelPackageArn"),
                 "package_content": json.loads(package_content),
                 "standalone_content": json.loads(standalone),
@@ -521,6 +572,12 @@ def main() -> int:
         "(package Model Card). Clarify HTML: …/models/evaluation/clarify/*/report.html",
         args.model_package_group,
     )
+
+    if not package_ok and not standalone_ok:
+        logger.error("Both package and standalone Model Card writes failed")
+        return 1
+    if not package_ok:
+        logger.warning("Package Model Card missing; standalone/snapshot still written")
     return 0
 
 
