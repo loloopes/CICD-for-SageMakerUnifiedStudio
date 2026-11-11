@@ -40,9 +40,9 @@ On **E2E Deploy MLOps Pipeline** (`workflow_dispatch`), `check_drift` (default o
 | `preprocess` | GlueJobOperator | Feature engineering from DataOps transformed data; snapshots raw `SOURCE_PATH` → `drift_reference/` |
 | `train_model` | SageMakerTrainingOperator | XGBoost training via `train_xgboost.py` (script mode) with MLflow tracking |
 | `evaluate_model` | SageMakerProcessingOperator | Batch evaluation on the held-out test set (`evaluate_model.py`) |
-| `clarify_analysis` | SageMakerProcessingOperator | Bias + SHAP via Clarify replacement (`run_clarify.py`; AWS Clarify closed to new accounts); HTML/JSON under `…/evaluation/clarify/` |
+| `clarify_analysis` | SageMakerProcessingOperator | Bias + SHAP via Clarify replacement (`run_clarify.py`; AWS Clarify closed to new accounts); HTML/JSON under `…/evaluation/clarify/` — **not** the AWS Clarify Studio app |
 | `register_model` | SageMakerRegisterModelVersionOperator | Registers a version in `stack-prediction-models` as `PendingManualApproval` |
-| `create_model_card` | SageMakerProcessingOperator | Creates/updates Model Card `stack-bank-mktg-model-card` (`create_model_card.py`) |
+| `create_model_card` | SageMakerProcessingOperator | Attaches package Model Card + Clarify metrics to the registry version (Studio **Models → version → Evaluate/Audit**); also upserts standalone `stack-bank-mktg-model-card` |
 | `deploy_model` | SageMakerProcessingOperator | Creates/updates the prediction endpoint (`deploy_model.py`) |
 | `data_drift_check` | GlueJobOperator | PSI / share-delta: live source vs `drift_reference/`; writes `result.json` |
 
@@ -108,6 +108,14 @@ Training job     : stack-xgb-<timestamp>
 Model package    : stack-prediction-models (registry group, versioned)
 Endpoint         : stack-prediction-<stage>   (e.g. stack-prediction-dev)
 ```
+
+## Where to see Model Card + Clarify
+
+After a successful `training_pipeline` run:
+
+1. **Model Card (GUI)** — Unified Studio / SageMaker Studio → **Models** → **Registered models** → `stack-prediction-models` → open the **latest version** → **Evaluate** / **Audit**. That content is the package Model Card from `create_model_card` (not a separate “Model cards” menu item on the Models list).
+2. **Clarify report (files)** — project S3 / Files → `shared/stack/mlops_pipeline/models/evaluation/clarify/<stack-clarify-…>/report.html` (and `clarify/latest/clarify_summary.json`). There is **no** AWS Clarify processing UI for new accounts; the HTML is the replacement.
+3. **CLI check** — `aws sagemaker describe-model-package --model-package-name <arn>` and look for `ModelCard` + `CustomerMetadataProperties.clarify_report_html`.
 
 ## Validation
 

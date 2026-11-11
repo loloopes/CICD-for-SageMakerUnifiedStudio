@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Create or update a SageMaker Model Card from evaluation + Clarify outputs.
+"""Create/update governance Model Card content for the bank-marketing model.
 
-Reads the latest ``evaluation_report.json`` under the evaluation prefix and
-optional ``clarify/latest/clarify_summary.json``, then creates/updates Model
-Card ``stack-bank-mktg-model-card`` (Draft) so Studio shows governance content
-for the bank-marketing XGBoost model.
+Two surfaces (Studio shows them differently):
+
+1. **Model package Model Card** (what you see under Models → Registered models →
+   version → Evaluate / Audit) — attached via ``update_model_package(ModelCard=…)``
+   using the *simplified* package schema.
+2. **Standalone Model Card** ``stack-bank-mktg-model-card`` — ``create/update_model_card``
+   for Governance / Model cards lists (full Model Card schema).
+
+Also writes Clarify bias metrics into evaluation_details and puts report URIs on
+the package ``CustomerMetadataProperties`` so the registry version itself points
+at ``…/evaluation/clarify/…/report.html``.
 
 Invoked as a SageMaker Processing job from ``training_pipeline`` after
 register + Clarify.
@@ -39,6 +46,11 @@ def parse_args():
 def _parse_s3(uri: str) -> tuple[str, str]:
     parsed = urlparse(uri.rstrip("/") + "/")
     return parsed.netloc, parsed.path.lstrip("/")
+
+
+def _clip(s: str | None, n: int) -> str:
+    s = "" if s is None else str(s)
+    return s if len(s) <= n else s[: n - 3] + "..."
 
 
 def _list_keys(s3, bucket: str, prefix: str) -> list[str]:
@@ -89,6 +101,24 @@ def load_clarify_summary(s3, eval_uri: str) -> dict | None:
     return None
 
 
+def load_clarify_analysis(s3, clarify: dict | None) -> dict | None:
+    """Load analysis.json (bias metrics) referenced by the clarify summary."""
+    if not clarify:
+        return None
+    uri = clarify.get("analysis_json") or ""
+    if not uri.startswith("s3://"):
+        return None
+    bucket, key = _parse_s3(uri)
+    # analysis_json is a file URI; _parse_s3 forces trailing slash — strip it.
+    key = key.rstrip("/")
+    try:
+        body = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
+        return json.loads(body)
+    except s3.exceptions.ClientError as e:
+        logger.warning("Could not load clarify analysis %s: %s", uri, e)
+        return None
+
+
 def latest_package(sm, group: str) -> dict | None:
     try:
         resp = sm.list_model_packages(
@@ -104,7 +134,7 @@ def latest_package(sm, group: str) -> dict | None:
         return None
 
 
-def build_card_content(eval_report: dict, clarify: dict | None, pkg: dict | None) -> str:
+def _holdout_metrics(eval_report: dict) -> list[dict]:
     metrics = eval_report.get("metrics") or {}
     metric_data = []
     for name in ("auc", "accuracy", "precision", "recall", "f1"):
@@ -112,7 +142,7 @@ def build_card_content(eval_report: dict, clarify: dict | None, pkg: dict | None
             metric_data.append(
                 {"name": name, "type": "number", "value": float(metrics[name])}
             )
-    if "test_samples" in metrics:
+    if "test_samples" in metrics and isinstance(metrics["test_samples"], (int, float)):
         metric_data.append(
             {
                 "name": "test_samples",
@@ -120,16 +150,66 @@ def build_card_content(eval_report: dict, clarify: dict | None, pkg: dict | None
                 "value": float(metrics["test_samples"]),
             }
         )
+    return metric_data
 
-    clarify_note = "Clarify not run for this cycle."
-    if clarify:
-        clarify_note = (
+
+def _bias_metrics(analysis: dict | None) -> list[dict]:
+    if not analysis:
+        return []
+    bias = analysis.get("bias") or {}
+    pre = bias.get("pre_training") or {}
+    post = bias.get("post_training") or {}
+    out = []
+    for name, val in (
+        ("DPL", pre.get("DPL")),
+        ("DI_labels", pre.get("DI")),
+        ("DPPL", post.get("DPPL")),
+        ("DI_predictions", post.get("DI")),
+        ("RD", post.get("RD")),
+        ("AD", post.get("AD")),
+    ):
+        if isinstance(val, (int, float)):
+            out.append({"name": name, "type": "number", "value": float(val)})
+    return out
+
+
+def _clarify_note(clarify: dict | None) -> str:
+    if not clarify:
+        return "Clarify replacement not run for this cycle."
+    return _clip(
+        (
             f"Bias+explainability report at {clarify.get('report_html')} "
-            f"(engine={clarify.get('engine', 'clarify')}; "
+            f"(engine={clarify.get('engine', 'clarify-replacement')}; "
             f"facet {clarify.get('facet_column')} >= {clarify.get('facet_threshold')}; "
             f"sample_rows={clarify.get('sample_rows')}). "
-            f"Open report.html in project Files/S3 to review."
-        )
+            "Open report.html under project Files/S3 "
+            "(…/models/evaluation/clarify/) — AWS Clarify processing is unavailable "
+            "to new accounts."
+        ),
+        2096,
+    )
+
+
+def _numeric_version(eval_report: dict, pkg: dict | None) -> float:
+    if pkg and isinstance(pkg.get("ModelPackageVersion"), (int, float)):
+        return float(pkg["ModelPackageVersion"])
+    raw = eval_report.get("model_version")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_standalone_card_content(
+    eval_report: dict,
+    clarify: dict | None,
+    analysis: dict | None,
+    pkg: dict | None,
+) -> str:
+    """Full Model Card schema for CreateModelCard / UpdateModelCard."""
+    holdout = _holdout_metrics(eval_report)
+    bias = _bias_metrics(analysis)
+    numeric_version = _numeric_version(eval_report, pkg)
 
     pkg_note = ""
     if pkg:
@@ -138,17 +218,32 @@ def build_card_content(eval_report: dict, clarify: dict | None, pkg: dict | None
             f"v{pkg.get('ModelPackageVersion')} ({pkg.get('ModelPackageArn')})."
         )
 
-    # SageMaker Model Card schema requires model_overview.model_version to be a
-    # number (registry package version). Training-job name strings go in notes.
-    numeric_version = 0.0
-    if pkg and isinstance(pkg.get("ModelPackageVersion"), (int, float)):
-        numeric_version = float(pkg["ModelPackageVersion"])
-    else:
-        raw = eval_report.get("model_version")
-        try:
-            numeric_version = float(raw)
-        except (TypeError, ValueError):
-            numeric_version = 0.0
+    evaluation_details = [
+        {
+            "name": "offline-holdout",
+            "evaluation_observation": _clip(
+                f"Holdout metrics from evaluate_model at "
+                f"{eval_report.get('inference_timestamp')}. {_clarify_note(clarify)}",
+                2096,
+            ),
+            "metric_groups": [
+                {"name": "binary_classification_metrics", "metric_data": holdout}
+            ],
+        }
+    ]
+    if bias:
+        evaluation_details.append(
+            {
+                "name": "clarify-bias",
+                "evaluation_observation": _clip(
+                    f"Clarify-replacement bias metrics "
+                    f"(facet {clarify.get('facet_column') if clarify else 'age'}). "
+                    f"Full HTML: {(clarify or {}).get('report_html', '')}",
+                    2096,
+                ),
+                "metric_groups": [{"name": "bias_metrics", "metric_data": bias}],
+            }
+        )
 
     content = {
         "model_overview": {
@@ -156,7 +251,7 @@ def build_card_content(eval_report: dict, clarify: dict | None, pkg: dict | None
                 "XGBoost binary classifier for UCI Bank Marketing term-deposit "
                 "subscription prediction (stack MLOps e2e example)."
             ),
-            "model_artifact": [eval_report.get("model_data_url", "")],
+            "model_artifact": [eval_report.get("model_data_url", "") or "s3://"],
             "algorithm_type": "xgboost",
             "problem_type": "Binary Classification",
             "model_creator": "stack-mlops-training-pipeline",
@@ -186,46 +281,183 @@ def build_card_content(eval_report: dict, clarify: dict | None, pkg: dict | None
                 "function": {"function": "BinaryCrossEntropy"},
                 "notes": "objective=binary:logistic, eval_metric=auc",
             },
-            "training_observations": (
+            "training_observations": _clip(
                 f"Training job {eval_report.get('training_job')}. "
                 f"Evaluation report: {eval_report.get('_s3_uri')}."
-                f"{pkg_note}"
+                f"{pkg_note}",
+                1024,
             ),
         },
-        "evaluation_details": [
-            {
-                "name": "offline-holdout",
-                "evaluation_observation": (
-                    f"Holdout metrics from evaluate_model at "
-                    f"{eval_report.get('inference_timestamp')}. {clarify_note}"
-                ),
-                "metric_groups": [
-                    {
-                        "name": "binary_classification_metrics",
-                        "metric_data": metric_data,
-                    }
-                ],
-            }
-        ],
+        "evaluation_details": evaluation_details,
         "additional_information": {
             "ethical_considerations": (
                 "Bank marketing scores can amplify targeting bias. Review Clarify "
                 "pre-/post-training bias metrics before promoting models."
             ),
-            "caveats_and_recommendations": (
+            "caveats_and_recommendations": _clip(
                 "Re-run Clarify when features or label definitions change. "
                 "Replace demo age facet with policy-approved protected attributes. "
-                f"Card generated {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}."
+                f"Card generated {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}.",
+                2048,
             ),
             "custom_details": {
-                "evaluation_report_uri": eval_report.get("_s3_uri", ""),
-                "clarify_summary_uri": (clarify or {}).get("_s3_uri", ""),
-                "clarify_report_html": (clarify or {}).get("report_html", ""),
-                "enriched_predictions_uri": eval_report.get("enriched_predictions_uri", ""),
+                "evaluation_report_uri": _clip(eval_report.get("_s3_uri", ""), 1024),
+                "clarify_summary_uri": _clip((clarify or {}).get("_s3_uri", ""), 1024),
+                "clarify_report_html": _clip((clarify or {}).get("report_html", ""), 1024),
+                "enriched_predictions_uri": _clip(
+                    eval_report.get("enriched_predictions_uri", ""), 1024
+                ),
             },
         },
     }
     return json.dumps(content)
+
+
+def build_package_card_content(
+    eval_report: dict,
+    clarify: dict | None,
+    analysis: dict | None,
+) -> str:
+    """Simplified ModelPackageModelCard schema (Studio Models → version tabs)."""
+    holdout = _holdout_metrics(eval_report)
+    bias = _bias_metrics(analysis)
+    artifact = eval_report.get("model_data_url") or ""
+    evaluation_details = [
+        {
+            "name": "offline-holdout",
+            "evaluation_observation": _clip(
+                f"Holdout metrics from evaluate_model at "
+                f"{eval_report.get('inference_timestamp')}. {_clarify_note(clarify)}",
+                2096,
+            ),
+            "metric_groups": [
+                {"name": "binary_classification_metrics", "metric_data": holdout}
+            ],
+        }
+    ]
+    if bias:
+        evaluation_details.append(
+            {
+                "name": "clarify-bias",
+                "evaluation_observation": _clip(
+                    f"Clarify-replacement bias (not AWS Clarify processing). "
+                    f"HTML report: {(clarify or {}).get('report_html', '')}",
+                    2096,
+                ),
+                "metric_groups": [{"name": "bias_metrics", "metric_data": bias}],
+            }
+        )
+
+    content = {
+        "model_overview": {
+            "model_creator": "stack-mlops-training-pipeline",
+            "model_artifact": [artifact] if artifact else [],
+        },
+        "intended_uses": {
+            "purpose_of_model": (
+                "Score bank marketing leads for likelihood of term-deposit subscription."
+            ),
+            "intended_uses": (
+                "Demo / CI-CD MLOps showcase for SageMaker Unified Studio. "
+                "Not for production credit or employment decisions."
+            ),
+            "factors_affecting_model_efficiency": (
+                "Feature distribution drift vs training reference; campaign seasonality; "
+                "class imbalance (scale_pos_weight used in training)."
+            ),
+            "risk_rating": "Low",
+            "explanations_for_risk_rating": (
+                "Educational pipeline on public UCI data; clarify facet is illustrative (age)."
+            ),
+        },
+        "training_details": {
+            "objective_function": {
+                "function": {"function": "Maximize", "facet": "auc"},
+                "notes": "objective=binary:logistic, eval_metric=auc",
+            },
+            "training_observations": _clip(
+                f"Training job {eval_report.get('training_job')}. "
+                f"Eval: {eval_report.get('_s3_uri')}.",
+                1024,
+            ),
+        },
+        "evaluation_details": evaluation_details,
+        "additional_information": {
+            "ethical_considerations": (
+                "Bank marketing scores can amplify targeting bias. Review Clarify "
+                "bias metrics before promoting models."
+            ),
+            "caveats_and_recommendations": _clip(
+                "Open clarify report.html under …/models/evaluation/clarify/. "
+                "AWS Clarify processing is closed to new customers; this pipeline "
+                "uses a local bias+SHAP replacement. "
+                f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}.",
+                2048,
+            ),
+            "custom_details": {
+                "evaluation_report_uri": _clip(eval_report.get("_s3_uri", ""), 1024),
+                "clarify_report_html": _clip((clarify or {}).get("report_html", ""), 1024),
+                "clarify_summary_uri": _clip((clarify or {}).get("_s3_uri", ""), 1024),
+            },
+        },
+    }
+    return json.dumps(content)
+
+
+def attach_package_card(sm, pkg: dict, package_content: str, clarify: dict | None) -> None:
+    arn = pkg["ModelPackageArn"]
+    meta = {
+        "stack_model_card": CARD_NAME[:128],
+        "stack_eval_engine": "evaluate_model",
+    }
+    if clarify and clarify.get("report_html"):
+        # CustomerMetadata values max 256 chars — prefer the S3 key tail if needed.
+        report = str(clarify["report_html"])
+        meta["clarify_report_html"] = _clip(report, 256)
+        meta["clarify_engine"] = _clip(str(clarify.get("engine", "local")), 256)
+    sm.update_model_package(
+        ModelPackageArn=arn,
+        ModelCard={
+            "ModelCardContent": package_content,
+            "ModelCardStatus": "Draft",
+        },
+        CustomerMetadataProperties=meta,
+    )
+    logger.info("Attached ModelCard + metadata to package %s", arn)
+
+
+def upsert_standalone_card(sm, name: str, content: str) -> None:
+    exists = False
+    try:
+        sm.describe_model_card(ModelCardName=name)
+        exists = True
+    except sm.exceptions.ClientError as e:
+        msg = str(e)
+        if (
+            "Could not find" not in msg
+            and "does not exist" not in msg.lower()
+            and "ResourceNotFound" not in msg
+        ):
+            raise
+
+    if exists:
+        sm.update_model_card(
+            ModelCardName=name,
+            Content=content,
+            ModelCardStatus="Draft",
+        )
+        logger.info("Updated standalone Model Card %s", name)
+    else:
+        sm.create_model_card(
+            ModelCardName=name,
+            Content=content,
+            ModelCardStatus="Draft",
+            Tags=[
+                {"Key": "project", "Value": "e2e-data-stack-ml-ops"},
+                {"Key": "pipeline", "Value": "training_pipeline"},
+            ],
+        )
+        logger.info("Created standalone Model Card %s", name)
 
 
 def main() -> int:
@@ -235,41 +467,35 @@ def main() -> int:
 
     eval_report = load_latest_evaluation(s3, args.evaluation_path)
     clarify = load_clarify_summary(s3, args.evaluation_path)
+    analysis = load_clarify_analysis(s3, clarify)
     pkg = latest_package(sm, args.model_package_group)
-    content = build_card_content(eval_report, clarify, pkg)
+
+    standalone = build_standalone_card_content(eval_report, clarify, analysis, pkg)
+    package_content = build_package_card_content(eval_report, clarify, analysis)
 
     logger.info("Evaluation : %s", eval_report.get("_s3_uri"))
     logger.info("Clarify    : %s", (clarify or {}).get("_s3_uri", "none"))
+    logger.info("Analysis   : %s", "yes" if analysis else "none")
     logger.info("Package    : %s", (pkg or {}).get("ModelPackageArn", "none"))
     logger.info("Model card : %s", args.model_card_name)
 
-    exists = False
-    try:
-        sm.describe_model_card(ModelCardName=args.model_card_name)
-        exists = True
-    except sm.exceptions.ClientError as e:
-        msg = str(e)
-        if "Could not find" not in msg and "does not exist" not in msg.lower() and "ResourceNotFound" not in msg:
+    # 1) Attach to registry version — this is what Studio Models UI shows.
+    if pkg and pkg.get("ModelPackageArn"):
+        try:
+            attach_package_card(sm, pkg, package_content, clarify)
+        except sm.exceptions.ClientError as e:
+            logger.error("update_model_package(ModelCard=…) failed: %s", e)
             raise
-
-    if exists:
-        sm.update_model_card(
-            ModelCardName=args.model_card_name,
-            Content=content,
-            ModelCardStatus="Draft",
-        )
-        logger.info("Updated Model Card %s", args.model_card_name)
     else:
-        sm.create_model_card(
-            ModelCardName=args.model_card_name,
-            Content=content,
-            ModelCardStatus="Draft",
-            Tags=[
-                {"Key": "project", "Value": "e2e-data-stack-ml-ops"},
-                {"Key": "pipeline", "Value": "training_pipeline"},
-            ],
-        )
-        logger.info("Created Model Card %s", args.model_card_name)
+        logger.warning("No model package found; skipping package ModelCard attach")
+
+    # 2) Standalone card (Governance list / export).
+    try:
+        upsert_standalone_card(sm, args.model_card_name, standalone)
+    except sm.exceptions.ClientError as e:
+        # Package attach is the GUI path that matters; don't fail the DAG if
+        # standalone CreateModelCard is restricted in the account.
+        logger.warning("Standalone Model Card upsert failed (non-fatal): %s", e)
 
     # Persist card snapshot next to evaluation artifacts
     bucket, prefix = _parse_s3(args.evaluation_path)
@@ -281,14 +507,20 @@ def main() -> int:
             {
                 "model_card_name": args.model_card_name,
                 "status": "Draft",
-                "content": json.loads(content),
+                "package_arn": (pkg or {}).get("ModelPackageArn"),
+                "package_content": json.loads(package_content),
+                "standalone_content": json.loads(standalone),
             },
             indent=2,
         ),
         ContentType="application/json",
     )
     logger.info("Snapshot s3://%s/%s", bucket, snap_key)
-    logger.info("View in Studio → Models / Governance → Model cards → %s", args.model_card_name)
+    logger.info(
+        "Studio: Models → Registered models → %s → version → Evaluate/Audit "
+        "(package Model Card). Clarify HTML: …/models/evaluation/clarify/*/report.html",
+        args.model_package_group,
+    )
     return 0
 
 
