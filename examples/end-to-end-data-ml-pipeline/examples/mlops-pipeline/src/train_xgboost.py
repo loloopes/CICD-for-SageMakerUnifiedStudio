@@ -21,11 +21,30 @@ import argparse
 import subprocess
 import sys
 
-# Install mlflow if not available (XGBoost container doesn't include it)
-try:
-    import mlflow  # noqa: F401
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "mlflow", "-q"])
+# XGBoost container does not ship MLflow. requirements.txt (sourcedir) should
+# already install mlflow + sagemaker-mlflow; keep a runtime fallback that
+# matches evaluate_model / deploy_model so ARN tracking URIs work.
+def _ensure_mlflow():
+    try:
+        import mlflow  # noqa: F401
+        import sagemaker_mlflow  # noqa: F401
+        return
+    except ImportError:
+        pass
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "mlflow>=3.1,<4",
+            "sagemaker-mlflow==0.4.0",
+        ]
+    )
+
+
+_ensure_mlflow()
 import json
 import logging
 import os
@@ -97,19 +116,28 @@ def setup_mlflow(tracking_server_arn, experiment_name):
         return False
 
     try:
+        _ensure_mlflow()
         import mlflow
-    except ImportError:
-        logger.warning("mlflow not installed in this environment, skipping MLflow setup")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("mlflow / sagemaker-mlflow unavailable (%s); skipping MLflow", e)
         return False
 
-    # Set the ARN as both the environment variable and tracking URI.
-    # The sagemaker-mlflow plugin intercepts requests when the tracking URI
-    # is an ARN and handles URL resolution + auth header injection internally.
-    os.environ["MLFLOW_TRACKING_ARN"] = tracking_server_arn
-    mlflow.set_tracking_uri(tracking_server_arn)
-    mlflow.set_experiment(experiment_name)
-    logger.info(f"MLflow configured: experiment={experiment_name}, tracking_uri={tracking_server_arn}")
-    return True
+    try:
+        # Set the ARN as both the environment variable and tracking URI.
+        # The sagemaker-mlflow plugin intercepts ARN tracking URIs.
+        os.environ["MLFLOW_TRACKING_ARN"] = tracking_server_arn
+        mlflow.set_tracking_uri(tracking_server_arn)
+        mlflow.set_experiment(experiment_name)
+        logger.info(
+            "MLflow configured: experiment=%s, tracking_uri=%s",
+            experiment_name,
+            tracking_server_arn,
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        # Do not fail training if the tracking server is unreachable / wrong region.
+        logger.warning("MLflow setup failed (%s); continuing without tracking", e)
+        return False
 
 
 def train(args):
